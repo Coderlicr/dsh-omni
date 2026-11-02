@@ -631,6 +631,31 @@ server.tool(
 );
 
 server.tool(
+  'qq_file_issue',
+  '把群友或主人反馈的 Yuki bug / 改进建议总结成一条处理项，写入 macOS 提醒事项，并在 due 时间提醒主人（同时私聊主人一条确认）。只在确实收到 bug/建议时调用；summary 必须是一句可执行的话（≤120字），detail 可放上下文；不要归档普通吐槽，不要重复归档同一条。',
+  {
+    key: z.string().describe('会话 key，格式 group:群号 或 private:QQ号'),
+    token: z.string().describe('会话令牌（见唤醒提示中的【会话令牌】）'),
+    summary: z.string().describe('一句话处理项，例如「群聊连续发图时回复太慢，需要限制并发」'),
+    details: z.string().optional().describe('可选：复现步骤、原话、影响范围'),
+    kind: z.enum(['bug', 'suggestion', 'other']).optional().describe('bug=故障；suggestion=改进建议；other=其他反馈'),
+    severity: z.enum(['low', 'medium', 'high']).optional().describe('可选：紧急程度，只用于记录')
+  },
+  async ({ key, token, summary, details, kind, severity }) => {
+    try {
+      const data = await agentApi('/api/socialV2/file-issue', {
+        method: 'POST',
+        headers: { 'x-agent-token': token },
+        body: JSON.stringify({ key, summary, details, kind, severity })
+      });
+      return { content: [{ type: 'text', text: serializeModelData(data) }] };
+    } catch (error) {
+      return { content: [{ type: 'text', text: `归档失败：${error?.message ?? error}` }], isError: true };
+    }
+  }
+);
+
+server.tool(
   'qq_mark_read',
   '将指定会话已查看的未读消息标记为已读。throughSeq 使用最近读取结果的 readThroughSeq，避免清除读取后才到达的新消息；省略 throughSeq 会按旧行为清空当前全部未读，因此推荐始终带上水位。注意：每次设置潜水/下一次唤醒前，桥接要求先用 qq_wait_for_messages(timeoutMs=300000) 完成一次沉睡前观察：5 分钟内没人说话可 mark_read 收尾沉睡；期间有人发新消息则先查看 newMessages，判断不需要你参与也可直接 mark_read 收尾；若你参与了回复，则下次想睡需重新等待观察窗口。',
   {

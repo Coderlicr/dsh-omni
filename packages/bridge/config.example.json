@@ -193,7 +193,8 @@
       "getSelfImage": true,
       "sendVoice": false,
       "speak": true,
-      "getBalance": true
+      "getBalance": true,
+      "fileIssue": true
     },
     "sandbox": {
       "enabled": true,
@@ -484,6 +485,12 @@
     "session": {
       "freshEveryTurn": false,
       "hotReloadPersona": true
+    },
+    "reminders": {
+      "enabled": false,
+      "listName": "Yuki",
+      "dueMinutes": 10,
+      "notifyOwner": true
     }
   },
   "features": {

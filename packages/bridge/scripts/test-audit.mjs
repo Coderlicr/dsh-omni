@@ -52,6 +52,8 @@ const tests = [
   'test-memory.mjs', 'test-memory-bridge.mjs',
   // 二代唤醒：纯图片/表情的独立概率通道（不放大文字闲聊）、冷却、@ 优先。
   'test-wake-media.mjs',
+  // macOS 提醒事项：配置、AppleScript 转义、权限失败文案（注入 osascript，不创建真实提醒）。
+  'test-reminders.mjs',
   // 语音系统整体结构检查（入口/依赖/端点/开关/文档一致性）
   'test-voice-system.mjs',
   // SnowLuma 账号/token 自发现（换 QQ 账号后 token 会变，写死的工具会 401）

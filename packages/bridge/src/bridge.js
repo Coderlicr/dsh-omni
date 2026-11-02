@@ -22,6 +22,7 @@ import { mdToPlain, splitForQQ, truncateText, truncateTextTail } from './md-to-p
 import { SENSITIVE_RE } from './sensitive.js';
 import { looksLikeUnfinished } from './v2-wait.js';
 import { compactModelMessage } from './qq-model-view.js';
+import { createReminder, normalizeRemindersConfig } from './reminders.js';
 import { safeFetch, safeFetchBuffer, looksLikeImageBuffer } from './safe-fetch.js';
 import { AUDIO_EXTS, cleanupTemp, describeAudio, formatBytes, formatDuration, inspectAudio, listAudioFiles, parseTargetKey, processAudioVolume, resolveAudioProcessing, resolveAudioSource, safeJoinLibrary } from './send-voice-lib.js';
 import { discoverSnowLumaConnection, persistSnowLumaEndpoint, persistToken } from './snowluma-conn.js';
@@ -101,9 +102,21 @@ const TOOL_LOG_FILE = path.join(STATE_DIR, 'tool-calls.jsonl');
 const TOKEN_USAGE_FILE = path.join(STATE_DIR, 'token-usage.jsonl');
 const ACTIVITY_LOG = path.join(STATE_DIR, 'qq-activity.log');
 const BRIDGE_LOG = path.join(STATE_DIR, 'bridge.log');
+const REMINDERS_PENDING_FILE = path.join(STATE_DIR, 'reminders-pending.json');
+
+/** 提醒事项权限失败时的本地兜底；最多 100 条，避免失败时无限增长。 */
+function logPendingReminder(entry) {
+  try {
+    const list = readJsonSafe(REMINDERS_PENDING_FILE, []);
+    atomicWriteJson(REMINDERS_PENDING_FILE, [...(Array.isArray(list) ? list : []), entry].slice(-100));
+  } catch {}
+}
 
 // 对群友/非主人的「后台原因封口」：模型可以知道能力受限，但不应把模型、工具、
 // 省电、ASR/TTS、限频、配额、记忆库这些词原样说出去。主人明确问技术原因时例外。
+// 群友/主人反馈 Yuki 的 bug 或改进建议时，给这一轮加一条归档提示（不硬编码结论）。
+const FEEDBACK_PATTERN = /(\bbug\b|报错|错误|崩溃|崩了|卡住|卡死|用不了|不好用|不工作|没反应|异常|故障|修复|建议|改进|希望.*(加|改|支持)|能不能.*(加|改|支持))/i;
+
 const FACADE_PROMPT_LINE = '【话术】对群友/非主人，不要提模型、提示词、工具、MCP、API、token、上下文、桥接、DSH、ASR/TTS、省电策略、电量、限频、配额、记忆库、报错或参数；能力受限就用“没电/在外面/嗓子哑了/听不清/卡了一下/想不起来”带过，不要原样念工具报错。只有主人明确问技术原因时才解释；群聊里也尽量一句人话带过。';
 
 /**
@@ -1031,6 +1044,9 @@ function loadConfig() {
     maxCount: 5,
     ...((cfg.socialV2?.media && typeof cfg.socialV2.media === 'object' && !Array.isArray(cfg.socialV2.media)) ? cfg.socialV2.media : {})
   };
+
+  // 提醒事项：只归一化，不在这里主动访问 macOS；真正写入发生在 qq_file_issue 工具调用。
+  cfg.socialV2.reminders = normalizeRemindersConfig(cfg.socialV2?.reminders);
 
   // socialV2.initialPromptMaxChars：会话「初始提示词」的字数上限。config.json 是用户可编辑的，
   // 手工写进字符串/负数/超大值时要收敛到安全区间，否则要么保存接口永远报"过长"，要么等于没上限。
@@ -2943,6 +2959,57 @@ async function main() {
   // 人格/仿真提示词热注入：按 DSH 会话记录已经注入过的版本。会话是持久的时候，
   // 只有变化或新会话才注入一次；旧会话已经不在时自然重新注入。
   const personaInjectState = new Map();
+  /**
+   * 把一条反馈写入 macOS 提醒事项（qq_file_issue 与 qq_memory_append 的 BUG: 兜底共用）。
+   * 权限失败时落本地 reminders-pending.json，并在主人私聊里说一声。
+   */
+  async function fileIssueToReminders({ key, summary, details = '', kind = 'bug' } = {}) {
+    const reminderCfg = normalizeRemindersConfig(cfg.socialV2?.reminders);
+    if (!reminderCfg.enabled) return { ok: false, error: '提醒事项集成未启用' };
+    const cleanSummary = String(summary ?? '').replace(/\s+/g, ' ').trim().slice(0, 120);
+    if (!cleanSummary) return { ok: false, error: 'summary 不能为空（一句话处理项）' };
+    const cleanDetails = String(details ?? '').replace(/\r\n?/g, '\n').trim().slice(0, 600);
+    const safeKind = ['bug', 'suggestion', 'other'].includes(String(kind)) ? String(kind) : 'bug';
+    const label = safeKind === 'suggestion' ? '建议' : safeKind === 'other' ? '反馈' : 'bug';
+    const st = getSocialV2State(key);
+    const actor = memoryActorForV2(st);
+    const reporter = (actor?.names?.[actor?.primary]) || (() => {
+      const last = [...(st.recentMessages ?? [])].reverse().find((m) => m && !m.isSelf);
+      return last ? String(last.sender ?? '群友') : '群友';
+    })();
+    const hash = crypto.createHash('sha1').update(`${key}|${cleanSummary}`).digest('hex').slice(0, 20);
+    const logFile = path.join(STATE_DIR, 'reminders-log.json');
+    const logEntries = readJsonSafe(logFile, []);
+    const recent = Array.isArray(logEntries) ? logEntries : [];
+    const duplicate = recent.find((entry) => entry && entry.hash === hash && Date.now() - Number(entry.at || 0) < 24 * 60 * 60 * 1000);
+    if (duplicate) return { ok: true, duplicate: true, summary: duplicate.summary, id: duplicate.id ?? null };
+    const notes = [
+      cleanDetails ? `详情：${cleanDetails}` : '',
+      `来源：${key}`,
+      `反馈者：${reporter}`,
+      `记录时间：${new Date().toLocaleString('zh-CN', { hour12: false })}`
+    ].filter(Boolean).join('\n');
+    const title = `[Yuki ${label}] ${cleanSummary}`;
+    const result = await createReminder({ title, notes, config: reminderCfg });
+    if (!result.ok) {
+      logPendingReminder({ hash, key, summary: cleanSummary, kind: safeKind, reporter, error: result.error, at: Date.now() });
+      if (reminderCfg.notifyOwner && cfg.ownerQQ) {
+        const ownerKey = `private:${cfg.ownerQQ}`;
+        try { await sendToQQ(ownerKey, `【Yuki】收到一条${label}：${cleanSummary}\n提醒事项没写成（${result.error}），先记在本地待办里。来源：${reporter}`); } catch {}
+      }
+      return { ok: false, error: result.error };
+    }
+    const entry = { hash, at: Date.now(), id: result.id ?? null, key, summary: cleanSummary, kind: safeKind, reporter };
+    atomicWriteJson(logFile, [...recent, entry].slice(-300));
+    if (reminderCfg.notifyOwner && cfg.ownerQQ) {
+      const ownerKey = `private:${cfg.ownerQQ}`;
+      const notice = `【Yuki】收到一条${label}：${cleanSummary}\n已写入提醒事项「${result.listName}」，${result.dueMinutes} 分钟后提醒。来源：${reporter}`;
+      try { await sendToQQ(ownerKey, notice); } catch {}
+    }
+    log(`[reminders] 已归档 ${safeKind}：${cleanSummary}（${result.listName}，${result.dueMinutes} 分钟后）`);
+    return { ok: true, id: result.id ?? null, summary: cleanSummary, kind: safeKind, listName: result.listName, dueMinutes: result.dueMinutes };
+  }
+
   const api = new NodeApiClient(cfg.dsh.baseUrl, undefined, {
     token: cfg.dsh.authToken,
     // true=用户在 config.json 里显式填的；false=从日志猜的。猜来的不优先于离线铸造。
@@ -5411,7 +5478,7 @@ async function main() {
             merged.autoReplyCheckMs = Number.isFinite(n) ? Math.max(1000, Math.round(n)) : (current.autoReplyCheckMs ?? 30000);
           }
           // tools：只接受布尔开关
-          const toolFlags = ['getPrompt', 'getUnread', 'getRecent', 'socialState', 'sendGroup', 'sendPrivate', 'reply', 'sendBurst', 'sendMessage', 'waitMessages', 'feedback', 'getMyRecent', 'getMessageDetail', 'getActiveMembers', 'setWakeConfig', 'markRead', 'memory', 'slangQuery', 'slangSubmit', 'getImages', 'getForwardMsg', 'sendPoke', 'listStickers', 'getStickerImage', 'sendSticker', 'sendImage', 'setStickerRemark', 'stickerNote', 'collectSticker', 'addSticker', 'getSelfImage', 'sendVoice', 'speak'];
+          const toolFlags = ['getPrompt', 'getUnread', 'getRecent', 'socialState', 'getBalance', 'fileIssue', 'sendGroup', 'sendPrivate', 'reply', 'sendBurst', 'sendMessage', 'waitMessages', 'feedback', 'getMyRecent', 'getMessageDetail', 'getActiveMembers', 'setWakeConfig', 'markRead', 'memory', 'slangQuery', 'slangSubmit', 'getImages', 'getForwardMsg', 'sendPoke', 'listStickers', 'getStickerImage', 'sendSticker', 'sendImage', 'setStickerRemark', 'stickerNote', 'collectSticker', 'addSticker', 'getSelfImage', 'sendVoice', 'speak'];
           if (body.tools && typeof body.tools === 'object') {
             merged.tools = { ...(current.tools ?? {}), ...body.tools };
             for (const k of toolFlags) {
@@ -5512,6 +5579,9 @@ async function main() {
           // asr / speak：逐层合并后交给各自的 normalize 收敛类型。
           if (body.asr && typeof body.asr === 'object' && !Array.isArray(body.asr)) {
             merged.asr = normalizeAsrConfig({ ...(current.asr ?? {}), ...body.asr });
+          }
+          if (body.reminders && typeof body.reminders === 'object' && !Array.isArray(body.reminders)) {
+            merged.reminders = normalizeRemindersConfig({ ...(current.reminders ?? {}), ...body.reminders });
           }
           if (body.speak && typeof body.speak === 'object' && !Array.isArray(body.speak)) {
             const nextSpeak = { ...(current.speak ?? {}), ...body.speak };
@@ -5669,6 +5739,21 @@ async function main() {
           });
           return;
         }
+        // 反馈归档：把 bug/建议总结成一条 macOS 提醒事项，并在 due 时间提醒主人。
+        if (req.method === 'POST' && url.pathname === '/api/socialV2/file-issue') {
+          const body = await readBody();
+          const key = String(body.key ?? '').trim();
+          const token = String(req.headers['x-agent-token'] ?? '').trim();
+          if (!key) { sendJson({ ok: false, error: 'key 不能为空' }, 400); return; }
+          if (!token || !agentTokenOk(key, token)) { sendJson({ ok: false, error: 'agent token 无效' }, 403); return; }
+          if (!v2SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
+          if (!v2ToolEnabled('fileIssue')) { sendJson({ ok: false, error: '工具未启用：qq_file_issue' }, 403); return; }
+          const result = await fileIssueToReminders({
+            key, summary: body.summary, details: body.details, kind: body.kind
+          });
+          sendJson(result, result.ok ? 200 : (String(result.error || '').includes('未启用') ? 409 : 502));
+          return;
+        }
         if (req.method === 'GET' && url.pathname === '/api/socialV2/prompt') {
           const key = String(url.searchParams.get('key') ?? '').trim();
           if (!key) { sendJson({ ok: false, error: 'key 不能为空' }, 400); return; }
@@ -5687,6 +5772,7 @@ async function main() {
             getRecent: 'qq_get_recent_messages',
             socialState: 'qq_social_state',
             getBalance: 'qq_get_balance',
+            fileIssue: 'qq_file_issue',
             sendGroup: 'qq_send_group_message',
             sendPrivate: 'qq_send_private_message',
             reply: 'qq_reply',
@@ -8157,13 +8243,22 @@ async function main() {
               sourceMessageId: extra.messageId ?? null,
               origin: 'explicit'
             });
+            // 兼容旧工具清单还没有 qq_file_issue 的 DSH：允许用已有的
+            // qq_memory_append(category="state", content="BUG: ...") 触发提醒事项归档。
+            let reminder = null;
+            const issue = /^\s*(BUG|bug|建议|反馈)\s*[:：]\s*(.+)$/s.exec(content);
+            if (issue && cfg.socialV2?.reminders?.enabled) {
+              const kind = issue[1] === '建议' ? 'suggestion' : issue[1] === '反馈' ? 'other' : 'bug';
+              reminder = await fileIssueToReminders({ key, summary: issue[2], details: content, kind });
+            }
             sendJson({
               ok: result.ok !== false,
               key,
               category,
               ...result,
+              ...(reminder ? { reminder } : {}),
               subject: { resolved: !!identity.qqId, label: identity.label ?? null },
-              hint: result.ok === false ? result.reason : '已写入长期记忆（跨会话可见，按作用域隔离）'
+              hint: result.ok === false ? result.reason : (reminder?.ok ? '已写入长期记忆，并已归档到提醒事项' : '已写入长期记忆（跨会话可见，按作用域隔离）')
             }, result.ok === false ? 400 : 200);
             return;
           }
@@ -11045,6 +11140,8 @@ async function main() {
       } else {
         noteMemoryActorV2(wakeState, [...wakeState.unread.slice(-12), ...wakeState.recentMessages.slice(-4)], opts.wakeReason);
       }
+      const feedbackHint = feedbackHintForV2(wakeState);
+      if (feedbackHint) promptText += `\n\n${feedbackHint}`;
     } else {
       // 非唤醒投递（控制台通知/排队消息）：用最近几条对方消息作为本轮发言者。
       try {
@@ -12134,6 +12231,28 @@ async function main() {
       ? `消息里出现「@${name}」、有人叫「${name}」、或引用你的消息，指的都是你 —— 不要当成别人`
       : '被 @、被叫到你的昵称、或引用你的消息，指的都是你 —— 不要当成别人';
     return `【你的身份】你在 QQ 上的昵称是${label}${idText}。${callBits}；群名片可能与昵称不同，at/引用段里带${id ? ` ${id} ` : '你的 QQ 号'}就是在叫你。\n\n`;
+  }
+
+  /**
+   * 只在最近一条像 bug/建议的消息上提示归档，避免每轮都塞一段工具说明。
+   * 同一个消息 ID 只提示一次；真正是否归档仍由模型判断（普通吐槽不写）。
+   */
+  function feedbackHintForV2(st) {
+    if (!st) return '';
+    const messages = [
+      ...(Array.isArray(st.unread) ? st.unread.slice(-5) : []),
+      ...(Array.isArray(st.recentMessages) ? st.recentMessages.slice(-3) : [])
+    ];
+    const hit = [...messages].reverse().find((m) => m && m.isSelf !== true
+      && FEEDBACK_PATTERN.test(String(m.plain ?? m.text ?? m.tail ?? '')));
+    if (!hit) return '';
+    const id = String(hit.messageId ?? hit.seq ?? '').trim();
+    if (id) {
+      const seen = Array.isArray(st.feedbackHinted) ? st.feedbackHinted : [];
+      if (seen.includes(id)) return '';
+      st.feedbackHinted = [...seen, id].slice(-20);
+    }
+    return '【反馈归档】最近消息像 bug/建议。如果确实是在反馈 Yuki 的问题，请优先用 qq_file_issue 总结成一句可执行的处理项（summary≤120字，kind=bug/suggestion），它会写入 macOS 提醒事项并提醒主人；如果当前工具清单里还没有 qq_file_issue，用 qq_memory_append(category="state", content="BUG: <一句话>", extra={"subjectKey":"反馈归档"}) 代替，桥接会代写提醒事项。只归档真问题，不要归档普通吐槽，也不要重复归档。';
   }
 
   function buildWakePromptV2(key, reason) {

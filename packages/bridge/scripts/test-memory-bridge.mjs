@@ -528,3 +528,13 @@ test('账户余额：控制台可查，agent 只在主人私聊可用，群聊�
     }
   });
 });
+
+test('反馈归档提示：bug/建议消息会提醒模型用 qq_file_issue', async () => {
+  await withBridge(async (h) => {
+    incoming(h, `group:${A_GROUP}`, { sender: '小明', userId: XIAOMING, text: 'Yuki 这个功能有 bug，发图太多时会卡住，建议加个限制' });
+    await h.deliverPrompt(`group:${A_GROUP}`, 'wake', { wakeReason: 'wake' });
+    const prompt = promptTextOf(h);
+    assert.match(prompt, /【反馈归档】/);
+    assert.match(prompt, /qq_file_issue/);
+  });
+});

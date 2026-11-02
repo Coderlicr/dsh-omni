@@ -29,6 +29,7 @@ import * as stateAcl from '../src/state-acl.mjs';
 import * as power from '../src/power.js';
 import * as roleCard from '../src/role-card.js';
 import * as consoleAssets from '../src/console-assets.js';
+import * as reminders from '../src/reminders.js';
 import * as memory from '../src/memory/index.js';
 import { unwrap, createTurnCollector } from '../src/dsh-client.js';
 
@@ -191,7 +192,7 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     ...markdown, ...sensitive, ...wait, ...safeFetch, ...forward, ...slang, ...sticker,
     ...modelPrices, ...tokenLedger, ...voiceLib, ...stateAcl, ...presetPrompt,
     ...voiceAsr, ...voiceTts, ...singing, ...shortCover, ...shortCoverV2, ...shortCoverConfig,
-    ...power, ...roleCard, ...memory, ...consoleAssets,
+    ...power, ...roleCard, ...memory, ...consoleAssets, ...reminders,
     // 电源监控在测试里必须确定：不 spawn pmset、不按宿主机当前电源改变策略、不留下轮询定时器。
     // 纯函数（normalizePowerConfig / powerAllowsCapability …）仍用 src/power.js 的真实现。
     createPowerMonitor: () => ({
