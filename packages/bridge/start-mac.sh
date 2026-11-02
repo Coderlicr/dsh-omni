@@ -10,7 +10,7 @@
 #   2. 停掉旧桥接进程（data/bridge.pid）；
 #   3. 后台启动新桥接并写回 pid。
 #
-# 用法：bash ~/Documents/dsh-omni/start-mac.sh
+# 用法：在仓库根目录执行 bash packages/bridge/start-mac.sh
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -52,11 +52,13 @@ stop_pid() {
   fi
 }
 
+# 控制台端口来自 config.json（默认 3100）；不能写死，否则换端口后旧桥接杀不掉。
+CONSOLE_PORT="$(node -e 'try { const c = require("./config.json"); process.stdout.write(String(Number(c.consolePort) || 3100)); } catch { process.stdout.write("3100"); }')"
 if [ -f data/bridge.pid ]; then
   stop_pid "$(cat data/bridge.pid)"
 fi
 # 端口上活着的桥接（pid 文件过期时不会出现在上面的检查里）
-for pid in $(lsof -nP -t -iTCP:3100 -sTCP:LISTEN 2>/dev/null || true); do
+for pid in $(lsof -nP -t -iTCP:"$CONSOLE_PORT" -sTCP:LISTEN 2>/dev/null || true); do
   stop_pid "$pid"
 done
 # 按命令名兜底：刚启动、还没开始监听端口的桥接
@@ -65,7 +67,7 @@ for pid in $(pgrep -f "node src/bridge.js" 2>/dev/null || true); do
 done
 # 等端口释放，最多 10 秒
 for _ in $(seq 1 20); do
-  lsof -nP -iTCP:3100 -sTCP:LISTEN >/dev/null 2>&1 || break
+  lsof -nP -iTCP:"$CONSOLE_PORT" -sTCP:LISTEN >/dev/null 2>&1 || break
   sleep 0.5
 done
 

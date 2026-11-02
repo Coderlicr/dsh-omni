@@ -128,12 +128,19 @@ export function apply(ctx) {
  * 也可以显式用 DSH_OMNI_ROOT 指到仓库根。
  */
 function resolveNodeBinary() {
-  const candidates = [
+  // 先看显式覆盖与当前 PATH（nvm/fnm/volta 等安装位置），再兜底常见路径。
+  // 不能只写死 Homebrew 路径：换一台电脑 Node 的安装位置可能完全不同。
+  const fromPath = String(process.env.PATH || '')
+    .split(path.delimiter)
+    .filter(Boolean)
+    .map((dir) => path.join(dir, 'node'));
+  const candidates = [...new Set([
     process.env.DSH_OMNI_NODE,
+    ...fromPath,
     '/opt/homebrew/bin/node',
     '/usr/local/bin/node',
     path.join(os.homedir(), '.n', 'bin', 'node'),
-  ].filter(Boolean);
+  ].filter(Boolean))];
   for (const candidate of candidates) {
     try { if (fs.existsSync(candidate)) return candidate; } catch {}
   }

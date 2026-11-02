@@ -43,15 +43,19 @@ function xml(value) {
 }
 
 function pathEnv() {
-  return [
+  // LaunchAgent 不继承登录 shell 的 PATH；把安装时的 PATH（nvm/fnm/volta 等）
+  // 和 Node 自身目录一起写进去，换一台电脑/换 Node 安装方式也能找到解释器。
+  const fromShell = String(process.env.PATH || '').split(':').filter(Boolean);
+  return [...new Set([
     path.dirname(NODE),
+    ...fromShell,
     '/opt/homebrew/bin',
     '/usr/local/bin',
     '/usr/bin',
     '/bin',
     '/usr/sbin',
     '/sbin',
-  ].filter(Boolean).join(':');
+  ])].join(':');
 }
 
 function plistText() {

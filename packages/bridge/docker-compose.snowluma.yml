@@ -33,7 +33,7 @@ services:
       SNOWLUMA_SCREEN: 1280x800x24
       SNOWLUMA_HOOK_AUTOLOAD: 1
       SNOWLUMA_QQ_FLAGS: "--disable-gpu --disable-software-rasterizer --disable-gpu-compositing"
-      TZ: America/New_York
+      TZ: ${TZ:-Etc/UTC}
     ports:
       - "127.0.0.1:6081:6081"
       - "127.0.0.1:5099:5099"
