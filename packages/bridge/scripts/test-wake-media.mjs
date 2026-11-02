@@ -132,3 +132,13 @@ test('人格/仿真提示词热注入：同一 DSH 会话只注入一次，不�
     await h.close();
   }
 });
+
+test('@ 识别兜底：event.self_id 缺失时用桥接 selfUserId；纯文本 @名字也认', async () => {
+  await withWake(async (h) => {
+    const event = image([{ type: 'at', data: { qq: '999' } }]);
+    delete event.self_id;
+    assert.equal(call(h, state(), event), 'atMention');
+    const textEvent = text('@Yuki 这个图你看下');
+    assert.equal(h.evaluateWakeTriggerV2(`group:${GROUP}`, state(), textEvent, 'group', '@Yuki 这个图你看下', '@Yuki 这个图你看下', false), 'atMention');
+  });
+});

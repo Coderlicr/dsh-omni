@@ -12068,8 +12068,21 @@ async function main() {
     const tr = st.wakeConfig?.triggers ?? {};
     if (tr.anyMessage) return 'anyMessage';
     if (tr.atMention) {
-      const atSelf = Array.isArray(event?.message) && event.message.some((seg) => seg?.type === 'at' && String(seg.data?.qq) === String(event?.self_id ?? ''));
+      // event.self_id 在少数 SnowLuma/网关事件里会缺失；桥接自己的 selfUserId 是登录时拿到的，
+      // 两个都认。只写 event.self_id 时，掉一次字段就会表现为「@ 了但不醒」。
+      const selfIds = new Set([event?.self_id, selfUserId].filter((id) => id != null && String(id).trim()).map(String));
+      const atSegs = Array.isArray(event?.message)
+        ? event.message.filter((seg) => seg?.type === 'at' && seg?.data?.qq != null)
+        : [];
+      const atSelf = atSegs.some((seg) => selfIds.has(String(seg.data.qq)));
       if (atSelf || quoteTargetIsSelf) return 'atMention';
+      // 有些客户端/网关会把 at 段折成纯文本「@YUKI」，不再给 at 段；文本里明确 @ 了名字也认。
+      const plainLower = String(plainContent ?? '').toLowerCase();
+      const names = [selfDisplayName, selfNickname].map((n) => String(n ?? '').trim().toLowerCase()).filter(Boolean);
+      if (names.some((name) => plainLower.includes('@' + name))) return 'atMention';
+      if (atSegs.length) {
+        log(`[wake] ${key} 收到 @${atSegs.map((seg) => seg.data.qq).join(',')}，但不是机器人（self=${[...selfIds].join('/') || '未知'}）`);
+      }
     }
     if (tr.nameMention && selfNickname) {
       // 用 plainContent（当前消息自己的文字）：textContent 含 `[引用 某人：原文]`，
