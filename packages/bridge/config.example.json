@@ -19,7 +19,10 @@
     "followDiscoveredEndpoint": true,
     "silenceWarnMs": 600000,
     "launcherPath": "",
-    "homeDir": ""
+    "homeDir": "",
+    "autoRestartOnStale": false,
+    "staleRestartMs": 180000,
+    "staleRestartCooldownMs": 900000
   },
   "ownerQQ": null,
   "sessionCwd": "",

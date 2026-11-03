@@ -11,7 +11,7 @@ import http from 'node:http';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { serveConsoleAsset } from './console-assets.js';
-import { execFileSync } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
 import yaml from 'js-yaml';
 import { extractPresetPrefix, presetPromptBlockers, presetPromptWarnings, renderPresetPromptYaml } from './preset-prompt.js';
 import { GEN1_ROLE_LINE_RE, parseRoleSections, roleCharStats, roleSectionReport, selectRoleText } from './role-card.js';
@@ -23,6 +23,7 @@ import { SENSITIVE_RE } from './sensitive.js';
 import { looksLikeUnfinished } from './v2-wait.js';
 import { compactModelMessage } from './qq-model-view.js';
 import { createReminder, normalizeRemindersConfig } from './reminders.js';
+import { shouldAutoRestartSnowluma } from './snowluma-recovery.js';
 import { safeFetch, safeFetchBuffer, looksLikeImageBuffer } from './safe-fetch.js';
 import { AUDIO_EXTS, cleanupTemp, describeAudio, formatBytes, formatDuration, inspectAudio, listAudioFiles, parseTargetKey, processAudioVolume, resolveAudioProcessing, resolveAudioSource, safeJoinLibrary } from './send-voice-lib.js';
 import { discoverSnowLumaConnection, persistSnowLumaEndpoint, persistToken } from './snowluma-conn.js';
@@ -716,7 +717,15 @@ function loadConfig() {
       allowRemote: false,
       ...(file.dsh ?? {})
     },
-    snowluma: { wsUrl: 'ws://127.0.0.1:3001', accessToken: '', ...(file.snowluma ?? {}) },
+    snowluma: {
+      wsUrl: 'ws://127.0.0.1:3001',
+      accessToken: '',
+      // 上游卡死时是否自动重启 SnowLuma 容器（默认关闭；打开后能清掉 QQ hook 卡死）。
+      autoRestartOnStale: false,
+      staleRestartMs: 180_000,
+      staleRestartCooldownMs: 900_000,
+      ...(file.snowluma ?? {})
+    },
     // 空 => 每个会话在 data/agents/<key> 下建独立工作目录
     sessionCwd: file.sessionCwd ?? '',
     agentPreset: file.agentPreset ?? 'qq-chat',
@@ -3713,6 +3722,8 @@ async function main() {
   const snowlumaHealth = {
     lastPacketAt: 0,      // 最近一个来自 SnowLuma 的事件包（含 meta/心跳）
     lastPacketKind: '',
+    lastAutoRestartAt: 0,
+    autoRestarting: false,
     accountOnline: null,  // bot_status 的 online/offline（需要较新的 SnowLuma 运行时）
     good: null,           // 接收链路健康度：来自心跳 status.good / get_status.good
     goodSource: '',       // 'heartbeat' | 'get_status' —— 便于诊断"这条判断从哪来"
@@ -3766,15 +3777,53 @@ async function main() {
       goodError: snowlumaHealth.goodError || null,
       lastPacketAgoMs: agoMs,
       lastPacketKind: snowlumaHealth.lastPacketKind || null,
+      autoRestartEnabled: cfg.snowluma?.autoRestartOnStale === true,
+      autoRestartAt: snowlumaHealth.lastAutoRestartAt || null,
+      autoRestarting: snowlumaHealth.autoRestarting === true,
       silent,
       degraded: confirmed || silent,
       hint,
     };
   }
 
+  /**
+   * 上游卡死时自动重启 SnowLuma 容器。
+   *
+   * 这不是根因修复，而是对「WS 还连着、账号在线、但 QQ hook 连续几分钟不出事件」
+   * 的实用恢复：容器重启后 hook 重新挂载，桥接会自动重连。默认关闭，配置开启后
+   * 才执行；重启有冷却，避免反复杀掉正在恢复的容器。
+   */
+  function maybeAutoRestartSnowluma(snap) {
+    if (cfg.snowluma?.autoRestartOnStale !== true) return;
+    const now = Date.now();
+    const should = shouldAutoRestartSnowluma({
+      enabled: true,
+      connected: snap.connected === true,
+      lastPacketAt: snowlumaHealth.lastPacketAt,
+      good: snap.good,
+      now,
+      staleMs: Math.max(60_000, Number(cfg.snowluma?.staleRestartMs) || 180_000),
+      cooldownMs: Math.max(60_000, Number(cfg.snowluma?.staleRestartCooldownMs) || 900_000),
+      lastRestartAt: snowlumaHealth.lastAutoRestartAt,
+      restarting: snowlumaHealth.autoRestarting
+    });
+    if (!should) return;
+    const container = String(cfg.stack?.container || 'snowluma');
+    snowlumaHealth.autoRestarting = true;
+    snowlumaHealth.lastAutoRestartAt = now;
+    const silentMin = snowlumaHealth.lastPacketAt ? Math.round((now - snowlumaHealth.lastPacketAt) / 60000) : 0;
+    log(`[snowluma] 上游${snap.good === false ? '自报 hook 异常' : `已 ${silentMin} 分钟无事件`}，自动重启容器 ${container}`);
+    execFile('docker', ['restart', container], { timeout: 90_000 }, (error) => {
+      snowlumaHealth.autoRestarting = false;
+      if (error) log(`[snowluma] 自动重启失败：${error.message}`);
+      else log(`[snowluma] 容器 ${container} 已重启，等待桥接重连`);
+    });
+  }
+
   /** 边沿触发地告警/恢复，避免每轮探测都刷一行日志。 */
   function reportSnowlumaHealth() {
     const snap = snowlumaHealthSnapshot();
+    maybeAutoRestartSnowluma(snap);
     if (snap.degraded && !snowlumaHealth.degraded) {
       snowlumaHealth.degraded = true;
       snowlumaHealth.reason = snap.hint ?? '';

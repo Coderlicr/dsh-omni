@@ -19,6 +19,9 @@
 | `dsh.baseUrl` | DSH 地址；macOS 启动脚本会探测桌面版端口并更新此项。 |
 | `dsh.authToken` | DSH 启动令牌。自动发现鉴权信息失败时，需要在本机配置中明确填写。 |
 | `consolePort` | 控制台端口，默认 `3100`。 |
+| `snowluma.autoRestartOnStale` | 上游连续无事件/自报 hook 异常时自动 `docker restart snowluma`，默认 `false`。 |
+| `snowluma.staleRestartMs` | 多少毫秒没有事件包触发自动重启，默认 `180000`。 |
+| `snowluma.staleRestartCooldownMs` | 两次自动重启的最小间隔，默认 `900000`。 |
 
 `VNC_PASSWD` 写在 `packages/bridge/.env` 中。按 README 中的 Compose 命令启动时，会通过 `--env-file` 读入该文件。
 
@@ -46,6 +49,26 @@ bash packages/bridge/start-mac.sh
 - `packages/bridge/data/bridge.log`
 
 桌面版 DSH 每次启动可能更换端口，因此应使用这个脚本重新连接。
+
+### SnowLuma 长时间运行后 @ 不回 / 消息不入库
+
+如果桥接日志出现：
+
+```
+⚠️ SnowLuma 上游不健康：已连接但 12 分钟没有收到任何事件包
+```
+
+说明 SnowLuma 的 QQ event hook 卡住了；这段时间的群消息（包括 @YUKI）**不会到达桥接**，不是唤醒配置或 @ 识别的问题。处理：
+
+```bash
+# 拉取新镜像并重建容器（QQ 登录态在 docker volumes 里，不会丢）
+docker compose --env-file packages/bridge/.env \
+  -f packages/bridge/docker-compose.snowluma.yml pull
+docker compose --env-file packages/bridge/.env \
+  -f packages/bridge/docker-compose.snowluma.yml up -d --force-recreate
+```
+
+桥接会在容器重启后自动重连。也可以打开 `snowluma.autoRestartOnStale`，让桥接在连续 3 分钟无事件或 SnowLuma 自报 `good=false` 时自动重启容器（默认冷却 15 分钟），避免 @ 丢失后无人处理。
 
 ### Web profile / Linux
 
