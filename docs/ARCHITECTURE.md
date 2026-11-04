@@ -67,6 +67,14 @@ QQ
   state, console token, mode, logs, pid/lock, and `data/memory/memory.sqlite`
   (long-term memory, WAL; backups under `data/memory/backups/`).
 
+### Delivery problems
+
+`/api/status` carries a `delivery` block: pending outbox entries, consecutive
+delivery failures, wake-lease timeouts and turns longer than two minutes. The
+console renders it as a 待处理 card that is hidden while the list is empty, and
+the agent-token view of `/api/status` never receives it (it names conversations
+and error text).
+
 ### `packages/launcher` (optional)
 
 A client-side DSH settings section. The repository copy contains only URL

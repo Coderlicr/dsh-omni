@@ -3208,6 +3208,7 @@ async function main() {
     const timer = setTimeout(() => {
       pendingWakeKeys.delete(key);
       pendingWakeLeaseTimers.delete(key);
+      noteLeaseTimeout(key);
     }, 30 * 60 * 1000);
     timer.unref?.();
     pendingWakeLeaseTimers.set(key, timer);
@@ -3242,6 +3243,81 @@ async function main() {
   const QUEUE_MAX = 50;
   const QUEUE_HINT_COOLDOWN_MS = 30_000;
   const queueRetries = new Map(); // key -> 连续补投失败次数（用于退避/暂停恢复）
+
+  // ── 待处理（只列需要人动手的）──────────────────────────────────────────────
+  // 口径跟原型 000 文档一致：健康时这一块必须是空的，不占任何注意力；
+  // 只有"人不去看就会一直坏着"的情况才浮上来。四种：投递连续失败、队列积压、
+  // 唤醒租约超时、慢回合。都只留最近 20 条，够定位，不会变成第二个日志面板。
+  const SLOW_TURN_MS = 120_000;
+  const SLOW_TURN_ALERT_MS = 300_000;
+  const FAILURE_THRESHOLD = 3;
+  const PROBLEM_BACKLOG = 20;
+  const PROBLEM_WINDOW_MS = 6 * 60 * 60 * 1000;
+  const deliveryFailures = new Map(); // key -> { count, at, error }
+  const leaseTimeouts = [];           // { key, at }
+  const slowTurns = [];               // { key, seconds, at }
+  const turnStartedAt = new Map();    // sessionId -> 起始时间（慢回合记账）
+
+  function noteDeliveryFailure(key, error) {
+    const prev = deliveryFailures.get(key);
+    deliveryFailures.set(key, {
+      count: (prev?.count ?? 0) + 1,
+      at: Date.now(),
+      error: String(error?.message ?? error ?? '').slice(0, 160)
+    });
+  }
+
+  function clearDeliveryFailure(key) {
+    deliveryFailures.delete(key);
+  }
+
+  function noteLeaseTimeout(key) {
+    leaseTimeouts.push({ key, at: Date.now() });
+    if (leaseTimeouts.length > 20) leaseTimeouts.shift();
+    log(`[wake] ${key} 唤醒租约超时（30 分钟无 turn/end），已释放判忙标记`);
+  }
+
+  /** 慢回合：只记超过阈值的，用来回答"这一轮为什么慢"，不做监控大盘。 */
+  function noteSlowTurn(sessionId, ms) {
+    if (!Number.isFinite(ms) || ms < SLOW_TURN_MS) return;
+    const key = reverse.get(sessionId) ?? String(sessionId);
+    slowTurns.push({ key, seconds: Math.round(ms / 1000), at: Date.now() });
+    if (slowTurns.length > 20) slowTurns.shift();
+    log(`[slow-turn] ${key} 回合耗时 ${Math.round(ms / 1000)}s`);
+  }
+
+  function deliverySnapshot() {
+    return {
+      pending: outbox.size(),
+      failures: [...deliveryFailures].map(([key, info]) => ({ key, ...info })),
+      leaseTimeouts: leaseTimeouts.slice(-20),
+      slowTurns: slowTurns.slice(-20)
+    };
+  }
+
+  /** 合成"待处理"清单。空数组 = 健康（控制台据此整块隐藏）。 */
+  function deliveryProblems() {
+    const problems = [];
+    const pending = outbox.size();
+    if (pending > PROBLEM_BACKLOG) {
+      problems.push({ kind: 'backlog', text: `待投递积压 ${pending} 条（DSH 可能没在跑或一直拒绝）` });
+    }
+    for (const [key, info] of deliveryFailures) {
+      if (info.count >= FAILURE_THRESHOLD) {
+        problems.push({ kind: 'delivery', text: `${key} 连续投递失败 ${info.count} 次`, detail: info.error });
+      }
+    }
+    const recentLease = leaseTimeouts.filter((x) => Date.now() - x.at < PROBLEM_WINDOW_MS);
+    if (recentLease.length) {
+      problems.push({ kind: 'lease', text: `唤醒租约超时 ${recentLease.length} 次（最近 ${recentLease[recentLease.length - 1].key}）` });
+    }
+    const recentSlow = slowTurns.filter((x) => Date.now() - x.at < PROBLEM_WINDOW_MS);
+    if (recentSlow.length >= 2 || recentSlow.some((x) => x.seconds >= SLOW_TURN_ALERT_MS / 1000)) {
+      const last = recentSlow[recentSlow.length - 1];
+      problems.push({ kind: 'slow', text: `慢回合 ${recentSlow.length} 次（最近 ${last.key}，${last.seconds}s）` });
+    }
+    return problems;
+  }
 
   // 队列的**权威副本在 outbox（磁盘）**，`queued` 只是启动后重建的内存索引。
   // 所有入队都走 enqueueDelivery：先落盘再进内存，避免"内存改了、磁盘没改"的分叉。
@@ -3478,6 +3554,7 @@ async function main() {
     sendToolSucceededSessions.delete(sessionId);
     pendingSendToolCalls.delete(sessionId);
     v2TurnStartAt.delete(sessionId);
+    turnStartedAt.delete(sessionId);
     turnLeaseNoted.delete(sessionId);
     toolCallNames.delete(sessionId);
     social.silentTurns.delete(sessionId);
@@ -3531,6 +3608,7 @@ async function main() {
     sendToolSucceededSessions.delete(sessionId);
     pendingSendToolCalls.delete(sessionId);
     v2TurnStartAt.delete(sessionId);
+    turnStartedAt.delete(sessionId);
     turnLeaseNoted.delete(sessionId);
     toolCallNames.delete(sessionId);
     api.events.forget?.(sessionId);
@@ -3624,6 +3702,7 @@ async function main() {
             if (!result.ok) {
               log(`补投失败 ${key}: ${result.error || '未知错误'}`);
               failed += 1;
+              noteDeliveryFailure(key, result.error || '未知错误');
               if (item.outboxId) outbox.fail(item.outboxId, result.error || '未知错误');
               const rest = items.slice(i);
               const existing = queued.get(key) ?? [];
@@ -3634,10 +3713,12 @@ async function main() {
             // 磁盘副本必须留着，否则重启就丢了。只有"真的投出去/被有意跳过"才删。
             if (item.outboxId && !result.queued && !result.retried) outbox.remove(item.outboxId);
             queueRetries.delete(key);
+            clearDeliveryFailure(key);
             sent += 1;
           } catch (error) {
             log(`补投异常 ${key}: ${error?.message ?? error}`);
             failed += 1;
+            noteDeliveryFailure(key, error);
             if (item.outboxId) outbox.fail(item.outboxId, error);
             // 当前项 + 剩余项整体放回，避免丢失；旧消息优先
             const rest = items.slice(i);
@@ -4342,6 +4423,8 @@ async function main() {
             // 上游健康只给操作者看：它包含网关诊断信息（good/hint），
             // 属于管理侧观测，不该进 QQ 会话里那个受限的智能体视图。
             snowluma: snowlumaHealthSnapshot(),
+            // 待处理只给操作者：里面是失败的具体会话 key 与错误文本，属于管理侧观测。
+            delivery: { ...deliverySnapshot(), problems: deliveryProblems() },
             activity: readActivityTail(100)
           });
           return;
@@ -13529,6 +13612,15 @@ async function main() {
    *      collector，否则同样会永久繁忙。
    */
   function trackTurnEvent(sessionId, event) {
+    // 慢回合记账放在最前面：不管后面有没有 collector（重连补发没有 turn/start），
+    // 只要看到 start/end 就记一笔。turn/end 没有配对的 start 时跳过，不猜时长。
+    if (event?.type === 'turn/start') {
+      turnStartedAt.set(sessionId, Date.now());
+    } else if (event?.type === 'turn/end') {
+      const started = turnStartedAt.get(sessionId);
+      turnStartedAt.delete(sessionId);
+      if (started) noteSlowTurn(sessionId, Date.now() - started);
+    }
     let collector = collectors.get(sessionId);
     if (!collector && event?.type === 'turn/start') {
       collector = createTurnCollector();

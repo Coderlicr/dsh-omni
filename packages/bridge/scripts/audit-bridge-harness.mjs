@@ -171,6 +171,7 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     getCfg() { return cfg; },
     inbox, outbox,
     enqueueDelivery, restoreOutboxDeliveries,
+    deliveryProblems, deliverySnapshot, noteDeliveryFailure, clearDeliveryFailure, noteLeaseTimeout, noteSlowTurn,
     powerSnapshot,
     evaluateWakeTriggerV2,
     setReady(value) { dshReady = value; },

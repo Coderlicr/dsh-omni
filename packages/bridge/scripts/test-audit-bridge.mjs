@@ -64,6 +64,34 @@ await test('undelivered prompt survives a bridge restart', async (h) => {
   assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).entries.length, 0, '投递成功后磁盘要清空');
 });
 
+await test('delivery problems stay empty until something needs a person', async (h) => {
+  assert.equal(h.deliveryProblems().length, 0, '健康时待处理必须为空');
+  h.noteDeliveryFailure('group:456', new Error('DSH 拒绝'));
+  h.noteDeliveryFailure('group:456', new Error('DSH 拒绝'));
+  assert.equal(h.deliveryProblems().length, 0, '失败两次还不报（避免抖动刷屏）');
+  h.noteDeliveryFailure('group:456', new Error('DSH 拒绝'));
+  const problems = h.deliveryProblems();
+  assert.equal(problems.length, 1);
+  assert.equal(problems[0].kind, 'delivery');
+  assert.match(problems[0].text, /group:456 连续投递失败 3 次/);
+  h.clearDeliveryFailure('group:456');
+  assert.equal(h.deliveryProblems().length, 0, '投递恢复后要自己消失');
+});
+
+await test('lease timeouts and slow turns surface without a log digger', async (h) => {
+  h.noteLeaseTimeout('group:456');
+  assert.ok(h.deliveryProblems().some((p) => p.kind === 'lease'), '租约超时要浮上来');
+  // 一次 130s 的回合只是记录，不打断人；超过 300s 才算问题。
+  h.noteSlowTurn('fixture-1', 130_000);
+  assert.equal(h.deliveryProblems().filter((p) => p.kind === 'slow').length, 0);
+  h.noteSlowTurn('fixture-1', 310_000);
+  assert.ok(h.deliveryProblems().some((p) => p.kind === 'slow'), '超过 5 分钟的回合要浮上来');
+  const snapshot = h.deliverySnapshot();
+  assert.equal(snapshot.slowTurns.length, 2);
+  assert.equal(snapshot.slowTurns[0].seconds, 130);
+  assert.equal(snapshot.pending, h.outbox.size());
+});
+
 await test('closed-agent session is not reused after switching to chat', async (h) => {
   h.setMode('closed-agent');
   const privileged = await h.ensureSession('private:123');
@@ -483,6 +511,17 @@ await test('malformed HTTP request targets return 400 without hanging', async (h
     }
     const noHeader = await call('/api/status', 'GET');
     assert.equal(noHeader.status, 401, '不带令牌必须被拒绝');
+
+    // 概览页的「待处理」整块依赖 /api/status 的 delivery 字段：字段没了控制台会永远空白。
+    const status = await call('/api/status', 'GET', admin);
+    assert.equal(status.status, 200);
+    const statusBody = JSON.parse(status.body);
+    assert.equal(typeof statusBody.delivery, 'object', '/api/status 必须带 delivery');
+    assert.ok(Array.isArray(statusBody.delivery.problems), 'delivery.problems 必须是数组');
+    assert.equal(statusBody.delivery.problems.length, 0, '健康时 problems 为空');
+    // 会话级主体不许看到 delivery（里面有别的群的 key 与错误文本）。
+    const agentView = JSON.parse((await call('/api/status', 'GET', { 'x-agent-token': 'x', 'x-agent-call': '1' })).body);
+    assert.equal(agentView.delivery, undefined, 'agent 视图不得包含 delivery');
 
     // ③ /api/authorize/read 不再接受空令牌（它曾对 agent 流量开放 ⇒ 成为免鉴权入口）。
     const noToken = await call('/api/authorize/read', 'POST', { ...admin, 'x-agent-token': 'x' }, { key: 'group:456' });

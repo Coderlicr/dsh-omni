@@ -1875,6 +1875,11 @@ button:active:not(:disabled) {
       <h2>挂起审批 / 提问</h2>
       <div id="pendingList">加载中…</div>
     </section>
+<section id="section-problems" data-page="overview" class="card span-all" style="display:none">
+      <h2>待处理</h2>
+      <div class="meta">健康时这块是空的；只有需要人动手的情况才会出现（投递连续失败 / 队列积压 / 唤醒租约超时 / 慢回合）。</div>
+      <ul id="deliveryProblemList" style="margin:8px 0 0 18px;padding:0"></ul>
+    </section>
 <section id="section-activity" data-page="overview" class="card">
       <h2>活动日志（最近 100 条）</h2>
       <pre id="activity">（空）</pre>
@@ -3137,6 +3142,26 @@ function renderSnowlumaHealth(sl) {
   el.style.display = '';
 }
 
+// 待处理：只有 needs-attention 的东西才出现，健康时整块隐藏（不占注意力）。
+function renderDeliveryProblems(delivery) {
+  const box = document.getElementById('section-problems');
+  const list = document.getElementById('deliveryProblemList');
+  if (!box || !list) return;
+  const problems = Array.isArray(delivery?.problems) ? delivery.problems : [];
+  if (!problems.length) {
+    box.style.display = 'none';
+    list.innerHTML = '';
+    return;
+  }
+  box.style.display = '';
+  list.innerHTML = '';
+  for (const p of problems) {
+    const li = document.createElement('li');
+    li.textContent = p.detail ? `${p.text}：${p.detail}` : p.text;
+    list.appendChild(li);
+  }
+}
+
 async function refresh() {
   try {
     const s = await api('/api/status');
@@ -3145,6 +3170,7 @@ async function refresh() {
     document.getElementById('roleModeText').textContent = s.roleMode === 'silent' ? '静默' : '正常';
     const modeLabel = s.mode === 'reserved' ? '一代仿真模式' : s.mode === 'reserved2' ? '二代仿真模式' : s.mode === 'closed-agent' ? '封闭 Agent' : '聊天模式';
     updateOverview(s, modeLabel);
+    renderDeliveryProblems(s.delivery);
     document.getElementById('activity').textContent = s.activity || '（空）';
     // 电源状态跟着状态刷新一起更新（不强制重画勾选框，避免盖掉正在编辑的选择）。
     void loadPower();
