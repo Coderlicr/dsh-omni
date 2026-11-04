@@ -33,6 +33,8 @@ const tests = [
   'test-v2-initial-prompt.mjs',
   // 令牌账本 / 价目表 与 体检修复回归（纯函数，无外部依赖）
   'test-token-usage.mjs', 'test-hardening.mjs',
+  // 长消息全文仓 + 待投递持久队列（纯模块：落盘/去重/退避/损坏文件只读降级）
+  'test-inbox-outbox.mjs',
   // 语音发送（纯函数 + 端点存在性；真发语音只在 --live 或 CLI 里做）
   'test-voice.mjs',
   // 语音 I/O + Seed-VC 按需 worker（假 fetch / 假 Python，不访问真实服务）

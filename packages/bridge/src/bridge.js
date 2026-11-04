@@ -50,6 +50,8 @@ import {
 import { extractForwardIds, forwardIdFromData, sanitizeForwardId, formatForwardResponse } from './forward.js';
 import { resolvePriceTable } from './model-prices.js';
 import { createTokenLedger } from './token-ledger.js';
+import { createInbox } from './inbox.js';
+import { createOutbox } from './outbox.js';
 import {
   loadSlang,
   saveSlang,
@@ -92,6 +94,12 @@ const ROLE_STATE_FILE = path.join(STATE_DIR, 'current-role.json');
 const SLANG_FILE = path.join(STATE_DIR, 'slang.json');
 const SLANG_SESSION_FILE = path.join(STATE_DIR, 'slang-session.json');
 const SOCIAL_V2_FILE = path.join(STATE_DIR, 'social-v2.json');
+// 长消息全文仓（只存被截断的消息）与待投递持久队列（只存还没被 DSH 接受的话）。
+// 两者都懒写盘：普通聊天不产生 inbox 文件，队列为空时 outbox 文件也不存在。
+const INBOX_DIR = path.join(STATE_DIR, 'inbox');
+const OUTBOX_FILE = path.join(STATE_DIR, 'outbox.json');
+const inbox = createInbox({ dir: INBOX_DIR, log: (...args) => log(...args) });
+const outbox = createOutbox({ file: OUTBOX_FILE, log: (...args) => log(...args) });
 // 记忆提炼会话（P3，默认关闭）。和黑话学习会话一样：独立 workspace、不映射 QQ、不发消息。
 const MEMORY_SESSION_FILE = path.join(STATE_DIR, 'memory-agent-session.json');
 // 操作者为每个会话预写的「初始提示词」（见 main() 里的 initialPrompts）。
@@ -3235,17 +3243,57 @@ async function main() {
   const QUEUE_HINT_COOLDOWN_MS = 30_000;
   const queueRetries = new Map(); // key -> 连续补投失败次数（用于退避/暂停恢复）
 
+  // 队列的**权威副本在 outbox（磁盘）**，`queued` 只是启动后重建的内存索引。
+  // 所有入队都走 enqueueDelivery：先落盘再进内存，避免"内存改了、磁盘没改"的分叉。
+  // 返回值是条目 id，投递成功时用它从磁盘删掉。
+  function dropQueuedItem(item) {
+    if (item?.outboxId) outbox.remove(item.outboxId);
+  }
+
+  function enqueueDelivery(key, payload, { dedupe = false } = {}) {
+    const entry = outbox.add({ key, payload, dedupe });
+    const items = queued.get(key) ?? [];
+    if (!items.some((it) => it.outboxId === entry.id)) {
+      items.push({ ...payload, outboxId: entry.id });
+      queued.set(key, items);
+    }
+    return entry.id;
+  }
+
+  /**
+   * 启动时把上次没投出去的消息装回内存队列。
+   *
+   * 这一步才是这次改动真正解决的问题：旧实现里两支队列都在内存，桥接一重启
+   * （崩溃、ensure-bridge 拉起、手动重启）没投出去的消息就永久消失，而 QQ 那边
+   * 看起来只是"它没理我"。DSH 恢复后由 flushQueue 统一补投。
+   */
+  function restoreOutboxDeliveries() {
+    const entries = outbox.pending();
+    if (!entries.length) return;
+    for (const entry of entries) {
+      const items = queued.get(entry.key) ?? [];
+      items.push({ ...entry.payload, outboxId: entry.id });
+      queued.set(entry.key, items);
+    }
+    log(`待投递队列已从磁盘恢复 ${entries.length} 条（DSH 就绪后补投）`);
+  }
+
   // reset 竞态导致 ensureSession 抛「会话创建期间已重置」时，把消息放回队列稍后重试。
-  // 已在队列中的相同文本不重复入队。
+  // 已在队列中的相同文本不重复入队（判据在 outbox.sameDelivery）。
   const enqueueForRetry = (key, promptText, opts = {}) => {
     const items = queued.get(key) ?? [];
-    if (!items.some((it) => it.promptText === promptText)) {
+    if (!items.some((it) => it.promptText === promptText && it.wakeReason === opts.wakeReason)) {
       if (items.length >= QUEUE_MAX) {
-        items.shift();
+        dropQueuedItem(items.shift());
         log(`队列满（${QUEUE_MAX}），丢弃最旧消息 (${key})`);
       }
-      items.push({ promptText, farewell: !!opts.farewell, silent: !!opts.silent, media: opts.media ?? [], wakeReason: opts.wakeReason });
-      queued.set(key, items);
+      enqueueDelivery(key, {
+        promptText,
+        farewell: !!opts.farewell,
+        silent: !!opts.silent,
+        media: opts.media ?? [],
+        wakeReason: opts.wakeReason
+      }, { dedupe: true });
     }
     queueRetries.delete(key); // 新消息入队视为新的机会，重置退避计数
     setTimeout(() => { flushQueue(); }, 3000);
@@ -3569,22 +3617,28 @@ async function main() {
             const id = Number(idStr);
             if (!modeAllowed(key, kind, id, cfg, currentMode)) {
               log(`补投跳过未授权会话 ${key}（当前模式 ${currentMode}）`);
+              dropQueuedItem(item);
               continue;
             }
             const result = await deliverPrompt(key, item.promptText, { farewell: item.farewell, silent: item.silent, media: item.media ?? [], wakeReason: item.wakeReason });
             if (!result.ok) {
               log(`补投失败 ${key}: ${result.error || '未知错误'}`);
               failed += 1;
+              if (item.outboxId) outbox.fail(item.outboxId, result.error || '未知错误');
               const rest = items.slice(i);
               const existing = queued.get(key) ?? [];
               queued.set(key, rest.concat(existing));
               break;
             }
+            // queued/retried：deliverPromptNow 已经把它放回（或放进了新的）内存队列，
+            // 磁盘副本必须留着，否则重启就丢了。只有"真的投出去/被有意跳过"才删。
+            if (item.outboxId && !result.queued && !result.retried) outbox.remove(item.outboxId);
             queueRetries.delete(key);
             sent += 1;
           } catch (error) {
             log(`补投异常 ${key}: ${error?.message ?? error}`);
             failed += 1;
+            if (item.outboxId) outbox.fail(item.outboxId, error);
             // 当前项 + 剩余项整体放回，避免丢失；旧消息优先
             const rest = items.slice(i);
             const existing = queued.get(key) ?? [];
@@ -3617,6 +3671,9 @@ async function main() {
       }
     }
   };
+  // 启动时先把磁盘上没投出去的消息装回内存；DSH 就绪后由 checkDsh 里的 flushQueue 补投。
+  restoreOutboxDeliveries();
+
   const checkDsh = async () => {
     let ok = false;
     try {
@@ -8066,6 +8123,7 @@ async function main() {
         if (req.method === 'GET' && url.pathname === '/api/socialV2/message-detail') {
           const key = String(url.searchParams.get('key') ?? '').trim();
           const messageId = String(url.searchParams.get('messageId') ?? '').trim();
+          const wantFull = String(url.searchParams.get('full') ?? '') === '1' || String(url.searchParams.get('full') ?? '') === 'true';
           if (!key || !messageId) { sendJson({ ok: false, error: 'key 和 messageId 不能为空' }, 400); return; }
           if (req.headers['x-agent-token'] && !agentTokenOk(key, req.headers['x-agent-token'])) { sendJson({ ok: false, error: 'agent token 无效' }, 403); return; }
           if (req.headers['x-agent-token'] && !v2SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
@@ -8107,6 +8165,16 @@ async function main() {
             if (info && found) Object.assign(info, forwardFields);
             // 正文本就是 200 字符预览；显式告知截断，避免模型把预览当成全文。
             if (info) info.textTruncated = String(info.text ?? '').length >= 200;
+            // full=1：从长消息仓补读全文。仓里只存"真的被截断过"的消息，
+            // 没存到就保持预览并保留 textTruncated —— 不假装有全文。
+            if (info && wantFull && found) {
+              const fullText = inbox.get({ key, messageId: found.messageId ?? messageId });
+              if (typeof fullText === 'string') {
+                info.text = fullText;
+                info.textTruncated = false;
+                info.textFull = true;
+              }
+            }
             sendJson({ ok: true, key, messageId, info });
           } catch (error) {
             sendJson({ ok: false, error: `获取消息详情失败：${error?.message ?? error}` }, 500);
@@ -11154,11 +11222,16 @@ async function main() {
     if (!dshReady) {
       const items = queued.get(key) ?? [];
       if (items.length >= QUEUE_MAX) {
-        items.shift();
+        dropQueuedItem(items.shift());
         log(`队列满（${QUEUE_MAX}），丢弃最旧消息 (${key})`);
       }
-      items.push({ promptText, farewell: !!opts.farewell, silent: !!opts.silent, media: opts.media ?? [], wakeReason: opts.wakeReason });
-      queued.set(key, items);
+      enqueueDelivery(key, {
+        promptText,
+        farewell: !!opts.farewell,
+        silent: !!opts.silent,
+        media: opts.media ?? [],
+        wakeReason: opts.wakeReason
+      });
       return { ok: true, queued: true };
     }
     let sessionId;
@@ -11857,6 +11930,22 @@ async function main() {
   // ── 二代仿真模式（reserved2）唤醒调度 ──────────────────────────────────
   function appendSocialV2Message(key, sender, textContent, plainContent, quoteTargetIsSelf, isOwner, messageId, media = [], userId = null, forwardIds = []) {
     const st = getSocialV2State(key);
+    // ── 入站去重 ──────────────────────────────────────────────────────────────
+    // 网关重连/重发同一条事件时，旧实现会再 append 一次：未读多一条、seq 前进一格，
+    // 还可能把已经处理过的消息重新唤醒一次。
+    //
+    // 判据是 **messageId + 正文指纹**，不是单独用 messageId：本地 seq 是我们自己自增的，
+    // 重发也一定会变，用它去重会失效；而万一网关/适配层复用了同一个 id 发两条不同的话，
+    // 只按 id 去重就会把**不同的一条真人消息**静默吞掉 —— 那是比重复严重得多的错。
+    // 同 id 同文本才是重放。只保留最近 200 个：够覆盖重连窗口，又不会让 social-v2.json 膨胀。
+    if (messageId != null) {
+      const id = String(messageId);
+      const digest = crypto.createHash('sha1').update(String(textContent ?? '')).digest('hex').slice(0, 8);
+      const fingerprint = `${id}:${digest}`;
+      const seen = Array.isArray(st.seenInbound) ? st.seenInbound : [];
+      if (seen.includes(fingerprint)) return { ok: true, duplicate: true };
+      st.seenInbound = [...seen, fingerprint].slice(-200);
+    }
     const recentLimit = Number(cfg.socialV2?.context?.recentLimit) || 100;
     const unreadLimit = Number(cfg.socialV2?.context?.unreadLimit) || 30;
     // 存储层的归一化**不能只留 kind/file/url/faceId**：reserved2 的图片/表情工具
@@ -11910,6 +11999,11 @@ async function main() {
       hasForward: safeForwardIds.length > 0,
       time: Date.now()
     };
+    // 长消息只在这里留 200 字预览；被截掉的部分进 inbox，供 qq_get_message_detail(full=1) 补读。
+    // 普通消息（≤200 字）一次磁盘都不写 —— 这是"不把群聊原文全集落盘"的边界。
+    if (inbox.put({ key, messageId: msg.messageId, seq: msg.seq, time: msg.time, text: String(textContent ?? '') })) {
+      msg.fullText = true;
+    }
     st.lastUnreadSeq = msg.seq;
     st.lastIncomingAt = Date.now();
     st.preSleepWaitSatisfiedAt = 0; // 有新消息进来，之前的“沉睡前已等待/已观察”作废
@@ -11936,6 +12030,7 @@ async function main() {
       }
     }
     saveSocialV2State();
+    return { ok: true, duplicate: false };
   }
 
   // 二代拍一拍事件写入最近/未读消息流，让 AI 能看到“谁拍了拍谁/拍了拍我”。
@@ -13083,7 +13178,12 @@ async function main() {
     // 二代仿真模式（reserved2）：唤醒调度
     if (currentMode === 'reserved2') {
       const sender = kind === 'group' ? (event.sender?.card || event.sender?.nickname || String(event.user_id)) : '私聊';
-      appendSocialV2Message(key, sender, textContent, plainContent, quoteTargetIsSelf, isOwner, event.message_id ?? event.msg_id ?? null, mediaList, event.user_id ?? null, extractForwardIds(event.message ?? []));
+      const appended = appendSocialV2Message(key, sender, textContent, plainContent, quoteTargetIsSelf, isOwner, event.message_id ?? event.msg_id ?? null, mediaList, event.user_id ?? null, extractForwardIds(event.message ?? []));
+      if (appended?.duplicate) {
+        // 重复事件既不进未读也不唤醒：否则网关抖动一次，群里就多一次"重新看一遍"的回合。
+        appendActivity(`${key} [reserved2] 重复事件已忽略（messageId ${event.message_id ?? event.msg_id}）`);
+        return;
+      }
       // 二代同样收集群聊黑话学习素材（AI 自主提交之外，桥接仍自动提取高频陌生词）
       if (kind === 'group') feedSlangWindow(key, sender, plainContent);
       if (socialV2.paused) {
@@ -13206,11 +13306,10 @@ async function main() {
     if (!dshReady) {
       const items = queued.get(key) ?? [];
       if (items.length >= QUEUE_MAX) {
-        items.shift();
+        dropQueuedItem(items.shift());
         log(`队列满（${QUEUE_MAX}），丢弃最旧消息 (${key})`);
       }
-      items.push({ promptText, media: mediaList });
-      queued.set(key, items);
+      enqueueDelivery(key, { promptText, media: mediaList });
       const now = Date.now();
       if ((queuedHintAt.get(key) ?? 0) + QUEUE_HINT_COOLDOWN_MS < now) {
         queuedHintAt.set(key, now);

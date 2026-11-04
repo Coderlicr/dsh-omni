@@ -29,7 +29,9 @@ test('local/admin tool restrictions and existing compaction budgets stay intact'
   const compaction = preset.find((row) => row.id === 'compaction');
   assert.deepEqual(compaction.isolate, { compaction: true, toolResultPruner: true });
   assert.deepEqual(compaction.config.find((row) => row.id === 'tool-result-pruner').config, {
-    thresholdChars: 50000, headChars: 45000, tailChars: 2000,
+    // 聊天会话里最长的工具结果是网页正文。旧 50000 意味着"搜三次之后整页还留在上下文里"：
+    // 缓存价不贵，但会长期稀释注意力。收成头 17000 + 尾 2000，够答"这篇讲了什么"。
+    thresholdChars: 20000, headChars: 17000, tailChars: 2000,
   });
   for (const text of ['你没有本地工具', '群友没有管理权限', 'API 令牌', '角色由桥接注入']) {
     assert.ok(prefix.includes(text), `missing safety rule: ${text}`);

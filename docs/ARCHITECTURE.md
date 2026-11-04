@@ -48,6 +48,12 @@ QQ
   bigram index, scope/ACL, rule-based capture buffer, dynamic token-budgeted
   injection, legacy `social-v2.json` migration with backup/verify/rollback.
   Design, schema and measured numbers: `docs/MEMORY.md`.
+- `src/inbox.js` — full text of messages that exceeded the 200-character window
+  preview, kept out of `social-v2.json` and readable through
+  `qq_get_message_detail(full=true)`. Short messages never touch the disk.
+- `src/outbox.js` — durable queue of prompts the bridge has not handed to DSH
+  yet. The in-memory `queued` map is rebuilt from it at startup, so a restart,
+  crash or `ensure-bridge` restart no longer drops undelivered replies.
 - `src/safe-fetch.js` — SSRF-checked HTTP fetch (b23 resolution, image/sticker
   downloads).
 - `dsh/agent-presets/*` — preset sources; generated into

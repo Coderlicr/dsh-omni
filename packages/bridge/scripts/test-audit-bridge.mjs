@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
 import { bridgeHarness } from './audit-bridge-harness.mjs';
 import http from 'node:http';
+import fs from 'node:fs';
+import path from 'node:path';
+import { createOutbox } from '../src/outbox.js';
 
 let failures = 0;
 async function test(name, run) {
@@ -9,6 +12,58 @@ async function test(name, run) {
   catch (error) { failures++; console.error('FAIL', name, error.message); }
   finally { await h.close(); }
 }
+await test('duplicate inbound event is ignored by messageId', async (h) => {
+  const key = 'group:456';
+  const first = h.appendSocialV2Message(key, 'A', '在吗', '在吗', false, false, 7001, [], 111, []);
+  const st = h.getSocialV2State(key);
+  assert.equal(first.duplicate, false);
+  assert.equal(st.unread.length, 1);
+  const seqBefore = st.lastUnreadSeq;
+  const second = h.appendSocialV2Message(key, 'A', '在吗', '在吗', false, false, 7001, [], 111, []);
+  assert.equal(second.duplicate, true);
+  assert.equal(st.unread.length, 1, '重发的同一条事件不能多进一条未读');
+  assert.equal(st.lastUnreadSeq, seqBefore, '重发不能推进本地 seq');
+  // 同一个 messageId 但正文不同：**必须收下**。判据是 id+正文指纹，
+  // 只按 id 去重会把"网关复用 id"时的另一条真人消息静默吞掉（比重复严重得多）。
+  const sameIdDifferentText = h.appendSocialV2Message(key, 'A', '在的', '在的', false, false, 7001, [], 111, []);
+  assert.equal(sameIdDifferentText.duplicate, false, '同 id 不同正文不能当成重放');
+  assert.equal(st.unread.length, 2);
+  // 不同 messageId 照常入库（去重不能误伤正常消息）。
+  const third = h.appendSocialV2Message(key, 'A', '吃了吗', '吃了吗', false, false, 7003, [], 111, []);
+  assert.equal(third.duplicate, false);
+  assert.equal(st.unread.length, 3);
+});
+
+await test('overlong message keeps its full text outside the window', async (h) => {
+  const key = 'group:456';
+  const text = '报错：' + 'x'.repeat(500);
+  h.appendSocialV2Message(key, 'A', text, text, false, false, 7002, [], 111, []);
+  const st = h.getSocialV2State(key);
+  const msg = st.unread.at(-1);
+  assert.equal(msg.text.length, 200, '窗口里仍然只放 200 字预览');
+  assert.equal(msg.fullText, true);
+  assert.equal(h.inbox.get({ key, messageId: 7002 }), text, '全文必须能按 messageId 取回');
+});
+
+await test('undelivered prompt survives a bridge restart', async (h) => {
+  h.setReady(false);
+  const result = await h.deliverPrompt('group:456', '重启期间的留言', {});
+  // 同一句话发了两次就是两条消息：投递层不能按文本合并（那会吞掉真人重复说的话）。
+  const repeated = await h.deliverPrompt('group:456', '重启期间的留言', {});
+  assert.equal(result.queued, true);
+  assert.equal(repeated.queued, true);
+  const file = path.join(h.temp, 'data', 'outbox.json');
+  assert.ok(fs.existsSync(file), '未投递的消息必须落盘');
+  const restored = createOutbox({ file }).load();
+  assert.equal(restored.length, 2, '重复文本也要各占一条');
+  assert.equal(restored[0].payload.promptText, '重启期间的留言');
+  // 模拟"重启后 DSH 恢复"：能真的投出去，并从磁盘清掉。
+  h.setReady(true);
+  await h.flushQueue();
+  assert.equal(h.calls.prompts.length, 2);
+  assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).entries.length, 0, '投递成功后磁盘要清空');
+});
+
 await test('closed-agent session is not reused after switching to chat', async (h) => {
   h.setMode('closed-agent');
   const privileged = await h.ensureSession('private:123');
