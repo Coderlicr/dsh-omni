@@ -52,6 +52,7 @@ import { resolvePriceTable } from './model-prices.js';
 import { createTokenLedger } from './token-ledger.js';
 import { createInbox } from './inbox.js';
 import { createOutbox } from './outbox.js';
+import { extractReplyTargetId, resolveThreadId, threadSlice, THREAD_LIMIT, THREAD_WINDOW_MS } from './thread.js';
 import {
   loadSlang,
   saveSlang,
@@ -940,6 +941,11 @@ function loadConfig() {
         unreadLimit: 30,
         contextWindow: 20,
         inlineWakeMessages: true,
+        // 会话内的「这件事」：同一 thread 的更新消息共享一个 id，快照会把被窗口挤掉的
+        // 更早上下文补成 thread 字段。默认开启；threadWindowMs 同一个人隔多久还算同一件事。
+        threadEnabled: true,
+        threadWindowMs: 10 * 60 * 1000,
+        threadLimit: 6,
         wakeMessageLimit: 12,
         wakeRecentLimit: 4,
         wakeMaxChars: 6000
@@ -11339,7 +11345,7 @@ async function main() {
       promptText = buildWakePromptV2(key, opts.wakeReason);
       wakeSnapshot = buildWakeSnapshotV2(key);
       if (wakeSnapshot) {
-        promptText += `\n\n【本次消息快照】\n${JSON.stringify(wakeSnapshot)}\n以上消息已提供，无需重复查询；partial=true 时用 qq_get_unread_messages(afterSeq=readThroughSeq) 继续读取。先处理当前消息；回复前如需确认后续补充，用 qq_wait_for_messages(purpose="reply") 补足短静默，已安静够久会立即返回，不要先长等。收尾只确认你已处理的 readThroughSeq（本地 seq，非 QQ messageId），传给 qq_mark_read 或 qq_set_wake_config 的 throughSeq；新到消息留待处理。`;
+        promptText += `\n\n【本次消息快照】\n${JSON.stringify(wakeSnapshot)}\n以上消息已提供，无需重复查询；threadId 相同的消息是同一件事，thread 字段是这件事更早的上下文（可能已标读），接着这件事说，不要只按「最近几条」理解。partial=true 时用 qq_get_unread_messages(afterSeq=readThroughSeq) 继续读取。先处理当前消息；回复前如需确认后续补充，用 qq_wait_for_messages(purpose="reply") 补足短静默，已安静够久会立即返回，不要先长等。收尾只确认你已处理的 readThroughSeq（本地 seq，非 QQ messageId），传给 qq_mark_read 或 qq_set_wake_config 的 throughSeq；新到消息留待处理。`;
         // 冻结本轮发言者：异步工具调用必须认这一批消息的人，而不是稍后说话的人。
         noteMemoryActorV2(wakeState, [...wakeSnapshot.messages, ...wakeSnapshot.recent], opts.wakeReason);
       } else {
@@ -12011,8 +12017,23 @@ async function main() {
   }
 
   // ── 二代仿真模式（reserved2）唤醒调度 ──────────────────────────────────
-  function appendSocialV2Message(key, sender, textContent, plainContent, quoteTargetIsSelf, isOwner, messageId, media = [], userId = null, forwardIds = []) {
+  function appendSocialV2Message(key, sender, textContent, plainContent, quoteTargetIsSelf, isOwner, messageId, media = [], userId = null, forwardIds = [], replyToId = null) {
     const st = getSocialV2State(key);
+    // ── 会话内的「这件事」────────────────────────────────────────────────────
+    // 只认两条硬信号：回复链、同一个人窗口内继续说。关键词/话题推断在群聊里误并率高，
+    // 宁可多开一个 thread，也不要把两件事粘成一件（误并比接不上更难排查）。
+    const threadCfg = cfg.socialV2?.context ?? {};
+    const threadEnabled = threadCfg.threadEnabled !== false;
+    const thread = threadEnabled
+      ? resolveThreadId({
+        messageId,
+        userId,
+        at: Date.now(),
+        replyToId,
+        recent: st.recentMessages,
+        windowMs: Number(threadCfg.threadWindowMs) > 0 ? Number(threadCfg.threadWindowMs) : THREAD_WINDOW_MS
+      })
+      : null;
     // ── 入站去重 ──────────────────────────────────────────────────────────────
     // 网关重连/重发同一条事件时，旧实现会再 append 一次：未读多一条、seq 前进一格，
     // 还可能把已经处理过的消息重新唤醒一次。
@@ -12082,6 +12103,7 @@ async function main() {
       hasForward: safeForwardIds.length > 0,
       time: Date.now()
     };
+    if (thread?.threadId) msg.threadId = thread.threadId;
     // 长消息只在这里留 200 字预览；被截掉的部分进 inbox，供 qq_get_message_detail(full=1) 补读。
     // 普通消息（≤200 字）一次磁盘都不写 —— 这是"不把群聊原文全集落盘"的边界。
     if (inbox.put({ key, messageId: msg.messageId, seq: msg.seq, time: msg.time, text: String(textContent ?? '') })) {
@@ -12443,6 +12465,26 @@ async function main() {
       const recent = st.recentMessages.filter((m) => !Number.isSafeInteger(m.seq) || !unread.has(m.seq)).slice(-maxRecent);
       for (const msg of recent.reverse()) if (!tryAdd('recent', msg)) break;
       packet.recent.reverse();
+    }
+    // 同一件事的更早上下文：只补当前 thread 的，不重算 readThroughSeq（那些早就读过了，
+    // 往里算会把水位往回推）。预算仍然受 wakeMaxChars 管：塞不下就少带几条。
+    if (context.threadEnabled !== false) {
+      const shown = [...packet.messages, ...packet.recent];
+      // 取"最新一条"的 thread：packet 里 messages 在前、recent 在后，数组顺序不等于时间顺序，
+      // 直接 reverse() 会拿到最近一条**其它人的**消息，把上下文带偏到别人的话题上。
+      const threadId = [...st.recentMessages].reverse().find((m) => m?.threadId)?.threadId;
+      if (threadId) {
+        const exclude = new Set(shown.map((m) => m.seq));
+        const maxThread = bounded('threadLimit', THREAD_LIMIT, 0, 20);
+        // 快照里 already 出现过的同 thread 消息不再重复；更早的按时间正序补在末尾。
+        const picked = threadSlice(st.recentMessages, threadId, { limit: maxThread, excludeSeqs: exclude })
+          .map((m) => compactModelMessage(m));
+        while (picked.length) {
+          const candidate = { ...packet, thread: picked };
+          if (JSON.stringify(candidate).length <= maxChars) { packet.thread = picked; break; }
+          picked.pop();
+        }
+      }
     }
     return packet;
   }
@@ -13261,7 +13303,7 @@ async function main() {
     // 二代仿真模式（reserved2）：唤醒调度
     if (currentMode === 'reserved2') {
       const sender = kind === 'group' ? (event.sender?.card || event.sender?.nickname || String(event.user_id)) : '私聊';
-      const appended = appendSocialV2Message(key, sender, textContent, plainContent, quoteTargetIsSelf, isOwner, event.message_id ?? event.msg_id ?? null, mediaList, event.user_id ?? null, extractForwardIds(event.message ?? []));
+      const appended = appendSocialV2Message(key, sender, textContent, plainContent, quoteTargetIsSelf, isOwner, event.message_id ?? event.msg_id ?? null, mediaList, event.user_id ?? null, extractForwardIds(event.message ?? []), extractReplyTargetId(event.message));
       if (appended?.duplicate) {
         // 重复事件既不进未读也不唤醒：否则网关抖动一次，群里就多一次"重新看一遍"的回合。
         appendActivity(`${key} [reserved2] 重复事件已忽略（messageId ${event.message_id ?? event.msg_id}）`);

@@ -54,6 +54,10 @@ QQ
 - `src/outbox.js` — durable queue of prompts the bridge has not handed to DSH
   yet. The in-memory `queued` map is rebuilt from it at startup, so a restart,
   crash or `ensure-bridge` restart no longer drops undelivered replies.
+- `src/thread.js` — the conversation-local "this one thing" id. A message
+  inherits its thread from the message it replies to, or from the same sender
+  within a ten-minute window; nothing else merges. Wake snapshots carry the
+  id on every message and re-add the earlier ones the window dropped.
 - `src/safe-fetch.js` — SSRF-checked HTTP fetch (b23 resolution, image/sticker
   downloads).
 - `dsh/agent-presets/*` — preset sources; generated into

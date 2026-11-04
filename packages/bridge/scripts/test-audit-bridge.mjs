@@ -92,6 +92,43 @@ await test('lease timeouts and slow turns surface without a log digger', async (
   assert.equal(snapshot.pending, h.outbox.size());
 });
 
+await test('a thread survives an interruption and comes back in the wake snapshot', async (h) => {
+  const key = 'group:456';
+  const st = h.getSocialV2State(key);
+  // A 先说要办的事；B 刷了六条把它挤出两个窗口；A 再补一句。
+  h.appendSocialV2Message(key, 'A', '帮我看看 X 项目的报错', '帮我看看 X 项目的报错', false, false, 8001, [], 111, []);
+  for (let n = 0; n < 6; n += 1) {
+    h.appendSocialV2Message(key, 'B', `插话${n}`, `插话${n}`, false, false, 8010 + n, [], 222, []);
+  }
+  h.appendSocialV2Message(key, 'A', '算了先看 README', '算了先看 README', false, false, 8020, [], 111, []);
+  // 现实里的样子：中间那些早被读过，只有最后一句是新的。
+  st.unread = st.unread.filter((m) => String(m.messageId) === '8020');
+  const recent = st.recentMessages.slice(-8);
+  assert.equal(recent[0].threadId, recent.at(-1).threadId, '同一件事的第二句要接上第一句（跨过中间六条）');
+  assert.notEqual(recent[0].threadId, recent[1].threadId, '插话的人不该被并进别人的 thread');
+
+  const snap = h.buildWakeSnapshotV2(key);
+  assert.ok(snap.messages.every((m) => m.threadId), '快照里的消息要带 threadId（模型才知道哪些是一件事）');
+  // 第一句已经被 wakeMessageLimit/wakeRecentLimit 两个窗口都挤出去了，只能靠 thread 带回来。
+  const shownSeqs = new Set([...snap.messages, ...snap.recent].map((m) => m.seq));
+  assert.equal(shownSeqs.has(recent[0].seq), false, '前置条件：第一句确实不在两个窗口里');
+  assert.ok(Array.isArray(snap.thread) && snap.thread.some((m) => String(m.messageId) === '8001'),
+    'thread 字段要带回被窗口挤掉的更早那句');
+  assert.ok(snap.thread.every((m) => !shownSeqs.has(m.seq)), 'thread 不能和已经给出的消息重复');
+});
+
+await test('reply chain beats the same-sender rule', async (h) => {
+  const key = 'group:456';
+  h.appendSocialV2Message(key, 'A', '第一个话题', '第一个话题', false, false, 8101, [], 111, []);
+  h.appendSocialV2Message(key, 'B', '第二个话题', '第二个话题', false, false, 8102, [], 222, []);
+  // A 回复 B 的那条：应该并到 B 的 thread，而不是 A 自己上一个 thread。
+  h.appendSocialV2Message(key, 'A', '回你一句', '回你一句', false, false, 8103, [], 111, [], '8102');
+  const st = h.getSocialV2State(key);
+  const [m1, m2, m3] = st.recentMessages.slice(-3);
+  assert.equal(m3.threadId, m2.threadId, '回复链优先于同发送者规则');
+  assert.notEqual(m3.threadId, m1.threadId);
+});
+
 await test('closed-agent session is not reused after switching to chat', async (h) => {
   h.setMode('closed-agent');
   const privileged = await h.ensureSession('private:123');

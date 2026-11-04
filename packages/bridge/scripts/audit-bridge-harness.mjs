@@ -33,6 +33,7 @@ import * as reminders from '../src/reminders.js';
 import * as memory from '../src/memory/index.js';
 import * as inboxModule from '../src/inbox.js';
 import * as outboxModule from '../src/outbox.js';
+import * as threadModule from '../src/thread.js';
 import { unwrap, createTurnCollector } from '../src/dsh-client.js';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
@@ -198,7 +199,7 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     ...modelPrices, ...tokenLedger, ...voiceLib, ...stateAcl, ...presetPrompt,
     ...voiceAsr, ...voiceTts, ...singing, ...shortCover, ...shortCoverV2, ...shortCoverConfig,
     ...power, ...roleCard, ...memory, ...consoleAssets, ...reminders,
-    ...inboxModule, ...outboxModule,
+    ...inboxModule, ...outboxModule, ...threadModule,
     // 电源监控在测试里必须确定：不 spawn pmset、不按宿主机当前电源改变策略、不留下轮询定时器。
     // 纯函数（normalizePowerConfig / powerAllowsCapability …）仍用 src/power.js 的真实现。
     createPowerMonitor: () => ({

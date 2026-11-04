@@ -475,6 +475,9 @@
       "unreadLimit": 30,
       "contextWindow": 20,
       "inlineWakeMessages": true,
+      "threadEnabled": true,
+      "threadWindowMs": 600000,
+      "threadLimit": 6,
       "wakeMessageLimit": 12,
       "wakeRecentLimit": 4,
       "wakeMaxChars": 6000

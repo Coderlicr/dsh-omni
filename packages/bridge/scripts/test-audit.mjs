@@ -35,6 +35,8 @@ const tests = [
   'test-token-usage.mjs', 'test-hardening.mjs',
   // 长消息全文仓 + 待投递持久队列（纯模块：落盘/去重/退避/损坏文件只读降级）
   'test-inbox-outbox.mjs',
+  // 会话内的「这件事」：回复链/同发送者两条硬信号，宁可多开也不误并
+  'test-thread.mjs',
   // 语音发送（纯函数 + 端点存在性；真发语音只在 --live 或 CLI 里做）
   'test-voice.mjs',
   // 语音 I/O + Seed-VC 按需 worker（假 fetch / 假 Python，不访问真实服务）
