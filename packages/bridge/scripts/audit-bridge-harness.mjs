@@ -164,6 +164,7 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     setMode(value) { currentMode = value; },
     // 电源监控：main 在这里提前 return，真实 monitor 不会被创建；测试可注入一个固定电源状态。
     setPowerMonitor(value) { powerMonitor = value; },
+    roleHintForMode, currentRoleHintV2, personaInjectState,
     // 长期记忆：暴露门面与内部上下文构造，供注入/隔离/预算类断言直接使用。
     memory, memorySystem: () => memorySystem,
     memoryContextForV2, memoryPromptBlockV2, resolveMemorySubjectV2,

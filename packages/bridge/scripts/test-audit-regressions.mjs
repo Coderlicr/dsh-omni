@@ -479,6 +479,37 @@ await test('R17 离电时非白名单工具 403 POWER_SAVING，核心聊天仍�
   } finally { await h.close(); }
 });
 
+// ── R18. 切换人格：标记会话重建，下一轮的唤醒提示词必须带新角色 ───────────────
+await test('R18 切换人格会标记会话重建，唤醒提示词带新角色', async () => {
+  const h = await bridgeHarness({
+    config: { socialV2: { session: { hotReloadPersona: true } } },
+    files: { 'roles/猫娘.md': '# 猫娘\n\n你是猫娘，说话软软的，句尾带“喵”。\n' }
+  });
+  try {
+    h.setMode('reserved2');
+    h.getSocialV2State('group:456');
+    await withServer(h, async (port) => {
+      const r = await call(port, '/api/role', { method: 'POST', body: { role: '猫娘' } });
+      assert.equal(r.status, 200, r.body);
+      assert.equal(r.json.role, '猫娘');
+      assert.ok(r.json.pendingSessions >= 1, '至少要标记一个会话');
+    });
+    const st = h.socialV2.conversations.get('group:456');
+    assert.equal(st.personaResetPending, true, '人格切换后必须标记下一轮重建会话');
+    const prompt = h.buildWakePromptV2('group:456', 'nameMention');
+    assert.match(prompt, /【当前角色】猫娘/, '唤醒提示词必须告诉模型当前角色');
+    assert.doesNotMatch(prompt, /yuki|雪之下/i, '不能残留旧角色');
+
+    // 真跑一次唤醒投递：旧会话必须被退役，新提示词必须带完整人格块。
+    h.state.sessions['group:456'] = 'sess-old-persona';
+    await h.sendWakePromptV2('group:456', 'nameMention');
+    assert.notEqual(h.state.sessions['group:456'], 'sess-old-persona', '人格切换后的第一次唤醒必须重建会话');
+    const delivered = h.calls.prompts.at(-1)?.content?.[0]?.text || '';
+    assert.match(delivered, /【当前人格（最新，优先于此前版本）】/, '投递的提示词必须带完整人格更新块');
+    assert.match(delivered, /猫娘/, '投递的提示词必须是新人格');
+  } finally { await h.close(); }
+});
+
 if (failures) {
   console.error(`\n${failures} 项失败`);
   process.exitCode = 1;

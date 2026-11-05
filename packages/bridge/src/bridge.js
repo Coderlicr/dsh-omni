@@ -4765,12 +4765,29 @@ async function main() {
               return;
             }
             writeRoleState(name, rs.mode);
-            log(`控制台：角色已设置为 ${name}`);
-            sendJson({ ok: true, role: name });
+            // 人格切换是身份级变化：清掉「本会话已注入过哪版人格」的记录，并给所有会话
+            // 打 pending 标记，在下一个真正可用的回合前重建 DSH 会话。
+            // 不这样做的话，旧会话的上下文里仍然是上一个人格，模型会继续按旧人格说话。
+            personaInjectState.clear();
+            let marked = 0;
+            for (const st of socialV2.conversations.values()) {
+              st.personaResetPending = true;
+              marked += 1;
+            }
+            saveSocialV2State();
+            log(`控制台：角色已设置为 ${name}（${marked} 个会话将在下一轮重建）`);
+            sendJson({ ok: true, role: name, pendingSessions: marked });
           } else {
             writeRoleState(null, rs.mode);
-            log('控制台：角色已清除');
-            sendJson({ ok: true, role: null });
+            personaInjectState.clear();
+            let marked = 0;
+            for (const st of socialV2.conversations.values()) {
+              st.personaResetPending = true;
+              marked += 1;
+            }
+            saveSocialV2State();
+            log(`控制台：角色已清除（${marked} 个会话将在下一轮重建）`);
+            sendJson({ ok: true, role: null, pendingSessions: marked });
           }
           return;
         }
@@ -10405,6 +10422,7 @@ async function main() {
             lastIdleRetireAt: Number(val.lastIdleRetireAt) || 0,
             agentToken,
             bootstrapSent: !!val.bootstrapSent,
+            personaResetPending: val.personaResetPending === true,
             wakeTimes: Array.isArray(val.wakeTimes) ? val.wakeTimes : [],
             sendTimes: Array.isArray(val.sendTimes) ? val.sendTimes : [],
             stickerCollectTimes: Array.isArray(val.stickerCollectTimes) ? val.stickerCollectTimes : [],
@@ -10499,6 +10517,9 @@ async function main() {
           lastIdleRetireAt: st.lastIdleRetireAt || 0,
           agentToken: st.agentToken,
           bootstrapSent: st.bootstrapSent,
+          // 人格切换后待重建会话：必须落盘，否则切换后桥接一重启就丢了，
+          // 旧会话会继续带着上一个人格的上下文说话。
+          personaResetPending: st.personaResetPending === true,
           wakeTimes: st.wakeTimes.slice(-200),
           sendTimes: st.sendTimes.slice(-500),
           stickerCollectTimes: Array.isArray(st.stickerCollectTimes) ? st.stickerCollectTimes.slice(-500) : [],
@@ -12725,6 +12746,16 @@ async function main() {
       log(`[reserved2] 唤醒频率超限，${Math.round(waitMs / 1000)}s 后重试 ${key}（${reason}）`);
       return;
     }
+    // 人格切换后：在下一个真正可用的回合前重建会话。
+    // 上面的 busy 检查已经挡住「回合进行中」，所以这里一定是没有在途回合的时机。
+    if (st.personaResetPending) {
+      if (state.sessions[key]) {
+        log(`[persona] ${key} 人格已切换，重建 DSH 会话以清掉旧人格上下文`);
+        retireIdleSessionV2(key, 0, '人格切换：重建会话');
+      }
+      st.personaResetPending = false;
+      saveSocialV2State();
+    }
     // Only a real new wake resets observation; skipped/busy candidates must
     // preserve the current turn's progress through its required wait window.
     st.preSleepWaitSatisfiedAt = 0;
@@ -12757,7 +12788,10 @@ async function main() {
       maybeRetireIdleSessionV2(key, st);
     }
     maybeReconcileTombstonesV2();
-    const promptText = buildWakePromptV2(key, reason);
+    // 不要在投递前先 build 一次：deliverPromptNow 会在 ensureSession 之后**再 build**
+    // （令牌可能刚轮换），先 build 的那份会被丢掉，但它的副作用（personaInjectState
+    // 已标记「本会话注入过新版人格」）会保留 —— 结果就是人格更新块永远发不出去。
+    // 这里传空串，真正的内容统一由 deliverPromptNow 生成。
     log(`[reserved2] 唤醒 ${key}（${reason}）`);
     const rollbackWakeTime = () => {
       const idx = st.wakeTimes.lastIndexOf(wakeTime);
@@ -12767,7 +12801,7 @@ async function main() {
     try {
       pendingWakeKeys.add(key);
       armPendingWakeLease(key);
-      const result = await deliverPrompt(key, promptText, { wakeReason: reason });
+      const result = await deliverPrompt(key, '', { wakeReason: reason });
       const restoreFiniteSleep = () => {
         if (hadFiniteSleep) {
           st.wakeConfig.sleepUntil = prevSleepUntil;
