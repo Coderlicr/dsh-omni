@@ -451,23 +451,34 @@ await test('R17 离电时非白名单工具 403 POWER_SAVING，核心聊天仍�
     h.setMode('reserved2');
     h.setPowerMonitor(batteryMonitor);
     const token = h.getSocialV2State('group:456').agentToken;
+    // 一张普通图片 + 一张表情：离电时图片被拒、表情仍可读。
+    h.appendSocialV2Message('group:456', '群友A', '[图片]', '[图片]', false, false, 'r17-image',
+      [{ kind: 'image', file: 'r17.jpg', url: '', summary: '[图片]', subType: '0' }], '1', []);
+    h.appendSocialV2Message('group:456', '群友A', '[动画表情]', '[动画表情]', false, false, 'r17-sticker',
+      [{ kind: 'image', file: 'r17.gif', url: '', summary: '[动画表情]', subType: '1' }], '1', []);
     await withServer(h, async (port) => {
       // 模型拿到的能力表里不应再出现语音/看图（省掉「调一次 → 403 → 再解释」）
       const prompt = await call(port, '/api/socialV2/prompt?key=group%3A456', { headers: { 'x-agent-call': '1' }, token });
       assert.equal(prompt.status, 200, prompt.body);
       assert.equal(prompt.json.power.saving, true, `离电时 power.saving 必须为 true：${JSON.stringify(prompt.json.power)}`);
       assert.ok(prompt.json.power.disabled.some((x) => x.id === 'images'), '图片理解应在禁用列表');
-      assert.ok(!prompt.json.enabledTools.includes('qq_get_message_images'), '禁用的工具不能出现在 enabledTools');
+      // 表情仍可看，所以工具要留着；普通图片由调用期按 media kind 拒绝。
+      assert.ok(prompt.json.enabledTools.includes('qq_get_message_images'), '表情还能看，图片工具不能从清单里摘掉');
       assert.ok(prompt.json.enabledTools.includes('qq_send_message'), '核心发送工具必须仍在');
 
       // 真调用被闸门挡住，且错误码/文案可被模型理解
-      const images = await call(port, '/api/images/message?key=group%3A456&messageId=1', { headers: { 'x-agent-call': '1' }, token });
+      const images = await call(port, '/api/images/message?key=group%3A456&messageId=r17-image', { headers: { 'x-agent-call': '1' }, token });
       assert.equal(images.status, 403, images.body);
       assert.equal(images.json.code, 'POWER_SAVING');
       assert.equal(images.json.capability, 'images');
-      assert.match(images.json.error, /看不了图|做不了/);
+      assert.match(images.json.error, /看不了/);
       assert.doesNotMatch(images.json.error, /电池|省电|ASR|TTS|工具|参数/);
       assert.match(images.json.hint, /不要重试/);
+
+      // 表情包走 sticker 能力，默认放行：不能因为图片被关连表情都看不了。
+      const sticker = await call(port, '/api/images/message?key=group%3A456&messageId=r17-sticker', { headers: { 'x-agent-call': '1' }, token });
+      assert.notEqual(sticker.status, 403, `表情读取不应被电源闸门拒绝：${sticker.body}`);
+      assert.notEqual(sticker.json?.code, 'POWER_SAVING');
 
       // 核心聊天不被电源策略挡（否则离电 = 机器人失联）
       const sent = await call(port, '/api/socialV2/send-message', {
@@ -507,6 +518,42 @@ await test('R18 切换人格会标记会话重建，唤醒提示词带新角色'
     const delivered = h.calls.prompts.at(-1)?.content?.[0]?.text || '';
     assert.match(delivered, /【当前人格（最新，优先于此前版本）】/, '投递的提示词必须带完整人格更新块');
     assert.match(delivered, /猫娘/, '投递的提示词必须是新人格');
+  } finally { await h.close(); }
+});
+
+
+// ── R19. 离电时唤醒提示词提前说明禁用能力（避免模型把 403 说成「加载不出来」） ──
+await test('R19 离电唤醒提示词提前说明图片/表情边界', async () => {
+  const batteryMonitor = {
+    start: async () => ({ source: 'battery' }),
+    stop() {},
+    state: () => ({ source: 'battery', committedAt: new Date().toISOString() }),
+    observed: () => ({ source: 'battery' }),
+    refresh: async () => ({ source: 'battery' }),
+    simulate: async () => ({ source: 'battery' }),
+    simulated: () => null,
+  };
+  const h = await bridgeHarness();
+  try {
+    h.setMode('reserved2');
+    h.getSocialV2State('group:456');
+    h.setPowerMonitor(batteryMonitor);
+    const prompt = h.buildWakePromptV2('group:456', 'nameMention');
+    assert.match(prompt, /【状态】/, '离电唤醒提示词必须带状态说明');
+    assert.match(prompt, /看不了普通图片/, '必须写明普通图片已关闭');
+    assert.match(prompt, /表情还能看/, '必须说明表情仍可读');
+
+    h.setPowerMonitor({
+      start: async () => ({ source: 'ac' }),
+      stop() {},
+      state: () => ({ source: 'ac', committedAt: new Date().toISOString() }),
+      observed: () => ({ source: 'ac' }),
+      refresh: async () => ({ source: 'ac' }),
+      simulate: async () => ({ source: 'ac' }),
+      simulated: () => null,
+    });
+    const acPrompt = h.buildWakePromptV2('group:456', 'nameMention');
+    assert.doesNotMatch(acPrompt, /【状态】/, '插电时不应多占状态提示词');
   } finally { await h.close(); }
 });
 

@@ -187,7 +187,6 @@ const PATH_CAPABILITY_RULES = [
   [/^\/api\/send\/voice(\/|$)/, 'voice'],
   [/^\/api\/socialV2\/speak(\/|$)/, 'speak'],
   [/^\/api\/socialV2\/(sing|cover)(\/|$)/, 'sing'],
-  [/^\/api\/images\//, 'images'],
   [/^\/api\/socialV2\/memory(-|$)/, 'memory'],
   [/^\/api\/socialV2\/(send-sticker|add-sticker|collect-sticker|sticker-list|sticker-image|sticker-note|sticker-remark|self-image)(\/|$)/, 'sticker'],
 ];
@@ -215,8 +214,8 @@ export function powerRefusal(capability) {
     speak: '现在说不了话，先打字吧',
     asr: '现在听不太清语音，你打字吧',
     sing: '今天嗓子不行，唱不了',
-    images: '现在看不了图',
-    sticker: '表情包先不发了',
+    images: '普通图片现在看不了，表情包还能看',
+    sticker: '表情包先不看了',
     memory: '我现在记性不太好',
     webSearch: '现在查不了东西',
   }[capability] || '现在做不了这个';
@@ -247,7 +246,9 @@ export function powerPromptLine(powerCfg, state) {
   if (noHear) human.push('听不了语音');
   if (noSpeak) human.push('说不了话');
   else if (policy.deny.includes('sing')) human.push('唱不了歌');
-  if (policy.deny.includes('images')) human.push('看不了图');
+  if (policy.deny.includes('images')) {
+    human.push(policy.deny.includes('sticker') ? '看不了图' : '看不了普通图片（表情还能看）');
+  }
   if (policy.deny.includes('webSearch')) human.push('查不了东西');
   if (policy.deny.includes('sticker')) human.push('发不了表情');
   if (policy.deny.includes('memory')) human.push('记性不太好');

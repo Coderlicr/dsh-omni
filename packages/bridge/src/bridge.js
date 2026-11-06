@@ -6032,7 +6032,11 @@ async function main() {
           for (const [flag, name] of Object.entries(toolMap)) {
             // qq_speak 只在开口说话总开关打开时列出，否则模型会去调一个必然 403 的工具
             if (flag === 'speak' && !speakNow.enabled) continue;
-            if (toolFlagCapability[flag] && !powerAllows(toolFlagCapability[flag])) continue;
+            const cap = toolFlagCapability[flag];
+            if (cap && !powerAllows(cap)) {
+              // 表情还能看：qq_get_message_images 对表情仍然可用，只是普通图片被关。
+              if (!(cap === 'images' && powerAllows('sticker'))) continue;
+            }
             if (tools[flag] !== false && !(stickerToolFlags.has(flag) && !stickerEnabled())) enabledTools.push(name);
           }
           sendJson({
@@ -8840,6 +8844,20 @@ async function main() {
           const media = findMessageMedia(key, messageId);
           if (!media.length) {
             sendJson({ ok: true, messageId, media: [], images: [], note: '该消息没有可读取的图片/表情元数据' });
+            return;
+          }
+          // 离电闸门按「这张图是不是表情」细分：表情包属于聊天，默认放行；
+          // 普通图片（截图/照片）才走 images 能力。不能让 qq_get_message_images
+          // 因为整条路由被 images 一刀切，导致离电时连表情都看不了。
+          const stickerOnly = media.every((m) => {
+            const kind = String(m?.kind ?? '');
+            if (kind === 'sticker' || kind === 'face') return true;
+            return String(m?.subType ?? '') === '1' || /表情/.test(String(m?.summary ?? ''));
+          });
+          const mediaCapability = stickerOnly ? 'sticker' : 'images';
+          if (req.headers['x-agent-call'] !== undefined
+            && !powerAllowsCapability(cfg.power, powerMonitor?.state?.() ?? null, mediaCapability)) {
+            sendJson({ ok: false, ...powerRefusal(mediaCapability) }, 403);
             return;
           }
           try {
@@ -12654,7 +12672,11 @@ async function main() {
     const freshLine = st.lastIdleRetireAt && Date.now() - Number(st.lastIdleRetireAt) < 10 * 60 * 1000
       ? '【会话已刷新】上一段对话因空闲已归档；你的长期记忆与最近消息仍在，不要追问“刚才聊到哪”，直接按当前消息自然接话。\n\n'
       : '';
-    const base = roleLine + identityLine + tokenLine + personaUpdateLine + freshLine + initialPromptLine + antiAiLine + facadeLine + styleLearnLine + proactiveLine + stickerLine + speakLine + singLine + replyLine + statusLine + accountLine + wakeLine + memoryLine + participationLine + preSleepLine;
+    // 离电时把「哪些能力被关了」提前写进唤醒提示词：模型不用先调一次工具吃 403，
+    // 也不会把「省电模式关了」说成「加载不出来」。插电时这一行是空串，不多占 token。
+    const powerText = powerPromptLine(cfg.power, powerMonitor?.state?.() ?? null);
+    const powerLine = powerText ? `${powerText}\n\n` : '';
+    const base = roleLine + identityLine + tokenLine + personaUpdateLine + freshLine + initialPromptLine + antiAiLine + facadeLine + styleLearnLine + powerLine + proactiveLine + stickerLine + speakLine + singLine + replyLine + statusLine + accountLine + wakeLine + memoryLine + participationLine + preSleepLine;
     if (reason === 'bootstrap') {
       return `${base}【引导唤醒】你已接入 QQ 会话 ${key}。\n当前是二代仿真模式：你的文本输出不会自动发送到 QQ，所有发言必须通过工具完成。\n请先调用 qq_get_prompt 查看角色、推荐值、可用工具和状态；有待回应的消息先按首回复节奏处理，最后才用 qq_set_wake_config 设置你希望如何被唤醒。`;
     }

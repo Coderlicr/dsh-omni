@@ -91,7 +91,8 @@ test('路径 → 能力映射：只认智能体写路径', () => {
   assert.equal(powerCapabilityForPath('/api/socialV2/speak'), 'speak');
   assert.equal(powerCapabilityForPath('/api/socialV2/sing'), 'sing');
   assert.equal(powerCapabilityForPath('/api/socialV2/cover'), 'sing');
-  assert.equal(powerCapabilityForPath('/api/images/message'), 'images');
+  // 图片端点不再一刀切：bridge 按 media kind 区分 sticker / images。
+  assert.equal(powerCapabilityForPath('/api/images/message'), null);
   assert.equal(powerCapabilityForPath('/api/socialV2/memory-append'), 'memory');
   assert.equal(powerCapabilityForPath('/api/socialV2/send-sticker'), 'sticker');
   // 核心聊天/管理端点不归电源策略管
