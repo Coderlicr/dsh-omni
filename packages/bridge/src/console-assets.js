@@ -6,6 +6,8 @@ const ASSETS = new Map([
   ['/console-assets/experience.css', ['experience.css', 'text/css; charset=utf-8']],
   ['/console-assets/experience.js', ['experience.js', 'text/javascript; charset=utf-8']],
   ['/console-assets/companion-rig.js', ['companion-rig.js', 'text/javascript; charset=utf-8']],
+  ['/console-assets/i18n.js', ['i18n.js', 'text/javascript; charset=utf-8']],
+  ['/console-assets/i18n.en.json', ['i18n.en.json', 'application/json; charset=utf-8']],
   ['/console-assets/mascot.png', ['mascot.png', 'image/png']],
   ['/console-assets/mascot-body.png', ['mascot-body.png', 'image/png']],
   ['/console-assets/mascot-parts.png', ['mascot-parts.png', 'image/png']],

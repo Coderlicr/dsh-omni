@@ -33,16 +33,16 @@ SnowLuma carries messages to and from QQ; DeepSeek Harness (DSH) handles the con
 ## Preview
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/media/console-overview-dark.png">
-  <img src="docs/media/console-overview.png" alt="The console home page with connection status, five navigation categories, and the interactive companion" width="1100">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/media/console-overview-dark.en.png">
+  <img src="docs/media/console-overview.en.png" alt="The console home page with connection status, five navigation categories, and the interactive companion" width="1100">
 </picture>
 
-The console groups settings into Overview, Chat & Persona, Senses & Expression, Memory & Learning, and Run & Safety. Settings include explanations of what they affect, and search takes you straight to the relevant control. The interface is currently in Chinese; this README is available in both languages.
+The console groups settings into Overview, Chat & Persona, Senses & Expression, Memory & Learning, and Run & Safety. Settings include explanations of what they affect, and search takes you straight to the relevant control. The console switches between Chinese and English from the top-right toggle; this README is available in both languages.
 
 <details>
 <summary>See conversation settings and contextual help</summary>
 
-<img src="docs/media/console-settings.png" alt="Conversation settings showing the idle-chat probability, check interval, and contextual explanation" width="1100">
+<img src="docs/media/console-settings.en.png" alt="Conversation settings showing the idle-chat probability, check interval, and contextual explanation" width="1100">
 
 For example, raising the proactive probability gives her more chances to join a quiet group. Time of day, recent activity, and the agent's own judgment still affect whether she speaks.
 
@@ -52,8 +52,8 @@ For example, raising the proactive probability gives her more chances to join a 
 
 <p align="center">
   <picture>
-    <source media="(prefers-reduced-motion: reduce)" srcset="docs/media/companion-still.png">
-    <img src="docs/media/companion-actions.gif" alt="Big Fat Fish waving, covering her eyes, moving her ears, and reacting to other interactions" width="480">
+    <source media="(prefers-reduced-motion: reduce)" srcset="docs/media/companion-still.en.png">
+    <img src="docs/media/companion-actions.en.gif" alt="Big Fat Fish waving, covering her eyes, moving her ears, and reacting to other interactions" width="480">
   </picture>
 </p>
 

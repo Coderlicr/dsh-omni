@@ -324,3 +324,13 @@ button:active:not(:disabled),button:not(.nav-item):active:not(:disabled) { trans
   *,*::before,*::after { animation:none!important; transition-duration:0s!important; scroll-behavior:auto!important }
   .companion-puppet,.quick-card:hover { transform:none!important }
 }
+
+/* English copy is wider than Chinese; give the sidebar room without touching
+   the Chinese layout. */
+@media (min-width:1200px){
+  html[lang=en] .sidebar{width:264px}
+  html[lang=en] .workspace{margin-left:264px}
+}
+html[lang=en] .nav-copy{min-width:0}
+html[lang=en] .nav-copy small{line-height:1.35;white-space:normal;overflow-wrap:anywhere}
+#langToggle{width:auto;min-width:38px;padding:0 6px;font-size:11px;letter-spacing:0;white-space:nowrap}
