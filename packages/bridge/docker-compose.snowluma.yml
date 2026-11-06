@@ -8,11 +8,22 @@
 #   SnowLuma WebUI：  http://127.0.0.1:5099
 #   OneBot HTTP/WS：  127.0.0.1:3000 / 127.0.0.1:3001
 # 三个卷不要删，登录态和配置都在里面。
+#
+# ⚠️ 设备指纹：QQ 用 hostname + MAC + machine-id 识别设备。Compose 默认会
+# 用容器 ID 前缀做 hostname、随机生成 MAC，重建就会让 QQ 认为是新设备并强制
+# 重新扫码（SnowLuma issue #12）。这里把两者固定成 .env 里的值；换机器时
+# 第一次登录后保持 .env 不变即可。
+# 镜像也钉到 digest，避免 `latest` 更新后被动重建。
+
+# 保持旧项目名，复用已有容器/卷的 Compose 标签（从 qq-bridge 迁移过来的）。
+name: qq-bridge
 
 services:
   snowluma:
-    image: ${SNOWLUMA_IMAGE:-motricseven7/snowluma:latest}
+    image: ${SNOWLUMA_IMAGE:-motricseven7/snowluma@sha256:53c3b722f7ea5fe4367b926488d24faf44b6798d88c76c44119436088dd3b192}
     container_name: ${SNOWLUMA_CONTAINER:-snowluma}
+    hostname: ${SNOWLUMA_HOSTNAME:-snowluma}
+    mac_address: ${SNOWLUMA_MAC_ADDRESS:-02:42:ac:11:53:01}
     restart: unless-stopped
     shm_size: 1gb
     ulimits:

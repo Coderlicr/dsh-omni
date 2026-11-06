@@ -39,6 +39,7 @@
     "setup:cover": "node scripts/setup-cover.mjs",
     "setup:sandbox": "node scripts/setup-sandbox.mjs",
     "setup:asr": "node scripts/setup-asr.mjs",
+    "install:nosleep": "node scripts/install-nosleep.mjs",
     "setup:seedvc": "node scripts/setup-seedvc.mjs",
     "make-ref": "node scripts/make-reference.mjs",
     "test-encoding": "node scripts/test-encoding.mjs",

@@ -24,6 +24,13 @@ Set `VNC_PASSWD` in `packages/bridge/.env`. The Compose command in the README ex
 
 The first bridge start creates `packages/bridge/data/console-token`. The `data/` directory also stores session state, logs, and the memory database; do not upload it. SnowLuma's three Docker volumes hold login state and configuration and should be retained across normal restarts.
 
+The compose file pins SnowLuma's `hostname`, MAC address, and image digest. Keep
+`SNOWLUMA_HOSTNAME` / `SNOWLUMA_MAC_ADDRESS` unchanged after the first QQ login:
+QQ uses them as part of its device fingerprint, and changing them looks like a
+new device (forcing a QR scan). Rebuilding alone no longer changes the
+fingerprint; whether QQ auto-logs-in still depends on the client setting, so
+check once after a rebuild.
+
 ## DSH profiles and startup
 
 For the desktop app:
@@ -80,6 +87,32 @@ node packages/bridge/scripts/install-watchdog.mjs --uninstall
 ```
 
 The LaunchAgent is `~/Library/LaunchAgents/com.dogeheng.dsh-omni-bridge.plist`. Logs are in `packages/bridge/data/watchdog.log`.
+
+<a id="nosleep"></a>
+## Stay online on AC power (macOS, optional)
+
+The QQ gateway runs in Docker. When the Mac idle-sleeps, Docker's VM pauses or
+restarts, the QQ connection drops, and the client may sit on the login screen
+waiting for a QR scan. Install a per-user LaunchAgent that runs
+`caffeinate -s` while on AC power:
+
+```bash
+node packages/bridge/scripts/install-nosleep.mjs
+```
+
+- It prevents **system** sleep only; the display may still turn off, and closing
+  the lid still sleeps the Mac.
+- The `-s` assertion is honored on AC only, so unplugging releases it.
+- The source script is `packages/bridge/scripts/nosleep-on-ac.sh`; the installer
+  copies it to `~/Library/Application Support/dsh-omni/` because launchd's
+  `/bin/sh` cannot read `~/Documents` (macOS TCC).
+- A legacy `ai.openclaw.nosleep-on-ac` agent, if present, is disabled and its
+  plist renamed to `.disabled-by-dsh-omni`.
+
+```bash
+node packages/bridge/scripts/install-nosleep.mjs --status
+node packages/bridge/scripts/install-nosleep.mjs --uninstall
+```
 
 ## Optional components
 

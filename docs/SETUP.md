@@ -61,14 +61,22 @@ bash packages/bridge/start-mac.sh
 说明 SnowLuma 的 QQ event hook 卡住了；这段时间的群消息（包括 @YUKI）**不会到达桥接**，不是唤醒配置或 @ 识别的问题。处理：
 
 ```bash
-# 拉取新镜像并重建容器（QQ 登录态在 docker volumes 里，不会丢）
-docker compose --env-file packages/bridge/.env \
-  -f packages/bridge/docker-compose.snowluma.yml pull
+# 重建容器（登录态在 docker volumes 里；设备指纹由 .env 固定，不会仅仅因为重建被当成新设备）
 docker compose --env-file packages/bridge/.env \
   -f packages/bridge/docker-compose.snowluma.yml up -d --force-recreate
 ```
 
-桥接会在容器重启后自动重连。也可以打开 `snowluma.autoRestartOnStale`，让桥接在连续 3 分钟无事件或 SnowLuma 自报 `good=false` 时自动重启容器（默认冷却 15 分钟），避免 @ 丢失后无人处理。
+镜像默认钉在 digest，`pull` 不会自动升级。要升级时，先把 `.env` 里的
+`SNOWLUMA_IMAGE` 改成新的 tag/digest，再 `pull` + `up -d`。
+
+**不要改 `.env` 里的 `SNOWLUMA_HOSTNAME` / `SNOWLUMA_MAC_ADDRESS`**：QQ 用
+hostname + MAC + machine-id 识别设备，改了就会被当成新设备、要求重新扫码。
+迁移到另一台机器时保持这两个值不变即可。QQ 是否自动登录取决于客户端设置；重建后建议确认一次，若停在登录页就扫码。
+
+桥接会在容器重启后自动重连。`snowluma.autoRestartOnStale` 打开时，桥接在连续
+3 分钟无事件或 SnowLuma 自报 `good=false` 时会自动重启容器（默认冷却 15 分钟）。
+设备指纹稳定时这通常安全；但如果 QQ 因此停在登录页，先检查
+`SNOWLUMA_HOSTNAME` / `SNOWLUMA_MAC_ADDRESS` 是否和登录时一致。
 
 ### Web profile / Linux
 
@@ -103,6 +111,25 @@ node packages/bridge/scripts/install-watchdog.mjs --uninstall
 ```
 
 LaunchAgent 位于 `~/Library/LaunchAgents/com.dogeheng.dsh-omni-bridge.plist`，日志位于 `packages/bridge/data/watchdog.log`。
+
+<a id="nosleep"></a>
+## 保持插电在线（macOS，可选）
+
+QQ 网关跑在 Docker 里。Mac 空闲睡眠会让 Docker 虚拟机暂停/重启，QQ 长连接断开，客户端可能停在登录页等扫码。安装一个用户级 LaunchAgent，在**插电时**用 `caffeinate -s` 阻止系统空闲睡眠：
+
+```bash
+node packages/bridge/scripts/install-nosleep.mjs
+```
+
+- 只阻止**系统**睡眠，不保持屏幕常亮：屏幕可以正常熄灭；合盖仍会睡。
+- `caffeinate -s` 只在 AC 电源下生效；拔电后自动释放，不会拖累续航。
+- 脚本源在 `packages/bridge/scripts/nosleep-on-ac.sh`；安装时复制到 `~/Library/Application Support/dsh-omni/`，因为 launchd 的 `/bin/sh` 读不了 `~/Documents`（macOS TCC）。
+- 如果发现旧的 `ai.openclaw.nosleep-on-ac`，会先停用它并把 plist 改名为 `.disabled-by-dsh-omni`，避免两个 `caffeinate` 叠加。
+
+```bash
+node packages/bridge/scripts/install-nosleep.mjs --status
+node packages/bridge/scripts/install-nosleep.mjs --uninstall
+```
 
 ## 可选组件
 

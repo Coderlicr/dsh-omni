@@ -131,7 +131,7 @@ bash packages/bridge/start-mac.sh
 
 脚本会探测 DSH 当前端口并启动桥接。打开 [本地控制台](http://127.0.0.1:3100)，按提示使用 `packages/bridge/data/console-token` 中的令牌，然后在白名单会话里测试聊天。
 
-DSH 桌面版重启后可能更换端口，需要重新运行启动脚本。也可以安装[自动跟随服务](docs/SETUP.md#watchdog)。
+DSH 桌面版重启后可能更换端口，需要重新运行启动脚本。也可以安装[自动跟随服务](docs/SETUP.md#watchdog)和[插电不睡](docs/SETUP.md#nosleep)。
 
 <details>
 <summary>只想先试试控制台？</summary>
